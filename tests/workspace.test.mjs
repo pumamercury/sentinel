@@ -187,7 +187,7 @@ test('legacy bugs become projects; project edits and required/hidden fields pers
     await f.destroy();
   }
 });
-test('attachments are byte-exact, scoped, bounded, backed up, and removed with a bug', async () => {
+test('attachments are byte-exact, scoped, bounded, backed up, and retained in Trash', async () => {
   const f = await fixture(),
     restored = await fixture();
   try {
@@ -289,7 +289,7 @@ test('attachments are byte-exact, scoped, bounded, backed up, and removed with a
     );
     await restored.request('bugs/' + imported.id, 'DELETE');
     const reused = (await restored.request('bugs', 'POST', report)).data;
-    assert.equal(reused.id, imported.id);
+    assert.notEqual(reused.id, imported.id);
     assert.deepEqual(
       (await restored.request(`bugs/${reused.id}/attachments`)).data,
       [],
@@ -430,7 +430,7 @@ test('issue types upgrade existing settings and persist across edits and backups
   }
 });
 
-test('large binary uploads stream to disk, restore, and clean up on deletion', async () => {
+test('large binary uploads stream to disk, restore, and survive issue deletion', async () => {
   const f = await fixture(),
     target = await fixture();
   try {
@@ -501,7 +501,20 @@ test('large binary uploads stream to disk, restore, and clean up on deletion', a
       1,
     );
     await f.request('bugs/' + bug.id, 'DELETE');
-    assert.deepEqual(readdirSync(diskDir), []);
+    assert.equal(
+      readdirSync(diskDir).length,
+      1,
+      'Trash retains attachment bytes',
+    );
+    assert.equal((await f.request(`bugs/${bug.id}/attachments`)).status, 404);
+    assert.equal(
+      (await f.request(`trash/${bug.id}/restore`, 'POST')).status,
+      200,
+    );
+    assert.equal(
+      (await f.request(`bugs/${bug.id}/attachments`)).data.length,
+      1,
+    );
   } finally {
     await f.destroy();
     await target.destroy();
@@ -584,5 +597,562 @@ test('inline media previews support ranges while downloads and unsafe files stay
     );
   } finally {
     await f.destroy();
+  }
+});
+
+test('quick reports keep core validation and can be enriched without completing every required field', async () => {
+  const f = await fixture(),
+    target = await fixture();
+  try {
+    await f.open();
+    await target.open();
+    const fields = (await f.request('fields')).data.map((field) =>
+      ['steps', 'expected', 'component', 'environment'].includes(field.key)
+        ? { ...field, required: true }
+        : field,
+    );
+    fields.push(
+      {
+        key: 'custom_build',
+        label: 'Build number',
+        type: 'number',
+        required: true,
+        enabled: true,
+        builtin: false,
+        options: [],
+      },
+      {
+        key: 'custom_date',
+        label: 'Test date',
+        type: 'date',
+        required: true,
+        enabled: true,
+        builtin: false,
+        options: [],
+      },
+      {
+        key: 'custom_device',
+        label: 'Device',
+        type: 'select',
+        required: true,
+        enabled: true,
+        builtin: false,
+        options: ['iPhone', 'iPad'],
+      },
+    );
+    assert.equal((await f.request('fields', 'PUT', fields)).status, 200);
+    assert.equal((await f.request('bugs', 'POST', report)).status, 400);
+    const quick = {
+      title: 'Capture now, investigate later',
+      project: 'Project1',
+      status: 'Open',
+      priority: 'Medium',
+      quickReport: true,
+    };
+    const created = await f.request('bugs', 'POST', quick);
+    assert.equal(created.status, 201);
+    assert.equal(created.data.quickReport, true);
+    assert.equal(created.data.steps, '');
+    assert.equal(created.data.component, '');
+    for (const invalid of [
+      { title: '' },
+      { project: '' },
+      { status: '' },
+      { priority: '' },
+      { status: 'Unknown' },
+      { priority: 'Unknown' },
+      { quickReport: 'true' },
+      { environment: 'Unconfigured' },
+      { steps: 42 },
+      { customFields: { custom_build: 'not a number' } },
+      { customFields: { custom_date: 'not a date' } },
+      { customFields: { custom_device: 'Android' } },
+      { status: 'Resolved' },
+    ])
+      assert.equal(
+        (await f.request('bugs', 'POST', { ...quick, ...invalid })).status,
+        400,
+        JSON.stringify(invalid),
+      );
+    const id = created.data.id;
+    let updated = await f.request(`bugs/${id}`, 'PUT', {
+      ...created.data,
+      description: 'Screen flashes',
+      quickReport: false,
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(
+      updated.data.quickReport,
+      true,
+      'reporting mode is retained on edit',
+    );
+    updated = await f.request(`bugs/${id}`, 'PATCH', {
+      field: 'component',
+      previous: '',
+      value: 'Home',
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(updated.data.expected, '');
+    assert.equal(
+      (
+        await f.request(`bugs/${id}`, 'PATCH', {
+          field: 'environment',
+          previous: '',
+          value: 'Unknown',
+        })
+      ).status,
+      400,
+    );
+    assert.equal(
+      (
+        await f.request(`bugs/${id}`, 'PATCH', {
+          field: 'component',
+          previous: '',
+          value: 'Stale',
+        })
+      ).status,
+      409,
+    );
+    assert.equal(
+      (await f.request(`bugs/${id}/quick`, 'POST', { status: 'Resolved' }))
+        .status,
+      400,
+    );
+    assert.equal(
+      (
+        await f.request(`bugs/${id}`, 'PATCH', {
+          field: 'fixVersion',
+          previous: '',
+          value: '1.2',
+        })
+      ).status,
+      200,
+    );
+    assert.equal(
+      (await f.request(`bugs/${id}/quick`, 'POST', { status: 'Resolved' }))
+        .status,
+      200,
+    );
+    assert.equal(
+      (
+        await f.request(`bugs/${id}`, 'PATCH', {
+          field: 'fixVersion',
+          previous: '1.2',
+          value: '',
+        })
+      ).status,
+      400,
+    );
+    const full = await f.request('bugs', 'POST', {
+      ...report,
+      customFields: {
+        custom_build: '42',
+        custom_date: '2026-09-23',
+        custom_device: 'iPhone',
+      },
+    });
+    assert.equal(full.status, 201);
+    assert.equal(
+      (
+        await f.request(`bugs/${full.data.id}`, 'PUT', {
+          ...full.data,
+          steps: '',
+          quickReport: true,
+        })
+      ).status,
+      400,
+      'a full report cannot bypass required fields by claiming to be quick',
+    );
+    const backup = (await f.request('backup')).data;
+    assert.equal((await target.request('import', 'POST', backup)).status, 200);
+    const restored = (await target.request('bugs')).data.find(
+      (bug) => bug.title === quick.title,
+    );
+    assert.equal(restored.quickReport, true);
+    assert.equal(
+      (
+        await target.request(`bugs/${restored.id}`, 'PATCH', {
+          field: 'expected',
+          previous: '',
+          value: 'Stable screen',
+        })
+      ).status,
+      200,
+    );
+    await f.close();
+    await f.open();
+    assert.equal(
+      (await f.request('bugs')).data.find((bug) => bug.id === id).quickReport,
+      true,
+    );
+  } finally {
+    await f.destroy();
+    await target.destroy();
+  }
+});
+
+test('legacy Fix version consolidation preserves conflicts, history and backups without refilling cleared values', async () => {
+  const f = await fixture(),
+    target = await fixture();
+  try {
+    await f.open();
+    await target.open();
+    const fields = (await f.request('fields')).data;
+    fields.push({
+      key: 'custom_fix',
+      label: 'Fix version',
+      type: 'text',
+      enabled: true,
+      required: false,
+      builtin: false,
+      options: [],
+    });
+    assert.equal((await f.request('fields', 'PUT', fields)).status, 200);
+    const backfill = (
+      await f.request('bugs', 'POST', {
+        ...report,
+        title: 'Legacy only',
+        customFields: { custom_fix: '1.2' },
+      })
+    ).data;
+    const conflict = (
+      await f.request('bugs', 'POST', {
+        ...report,
+        title: 'Conflicting versions',
+        fixVersion: '2.0',
+        customFields: { custom_fix: '1.5' },
+      })
+    ).data;
+    const legacyBackup = (await f.request('backup')).data;
+    legacyBackup.bugs.find((bug) => bug.id === backfill.id).status = 'Resolved';
+    assert.equal(
+      (await target.request('import', 'POST', legacyBackup)).status,
+      200,
+      'legacy backups receive the same migration before import',
+    );
+    assert.equal(
+      (await target.request('bugs')).data.find(
+        (bug) => bug.title === backfill.title,
+      ).fixVersion,
+      '1.2',
+    );
+    assert.equal(
+      (await target.request('fields')).data.find(
+        (field) => field.key === 'custom_fix',
+      ).enabled,
+      false,
+    );
+    await f.close();
+    await f.open();
+    let bugs = (await f.request('bugs')).data;
+    const copied = bugs.find((bug) => bug.id === backfill.id);
+    assert.equal(copied.fixVersion, '1.2');
+    assert.equal(copied.customFields.custom_fix, '1.2');
+    assert.equal(copied.updatedAt, backfill.updatedAt);
+    assert.deepEqual(copied.history, backfill.history);
+    const kept = bugs.find((bug) => bug.id === conflict.id);
+    assert.equal(kept.fixVersion, '2.0');
+    assert.equal(kept.customFields.custom_fix, '1.5');
+    const config = (await f.request('fields')).data;
+    assert.equal(
+      config.find((field) => field.key === 'fixVersion').label,
+      'Fix version',
+    );
+    assert.equal(
+      config.find((field) => field.key === 'custom_fix').enabled,
+      false,
+    );
+    assert.equal(
+      (
+        await f.request(`bugs/${backfill.id}`, 'PATCH', {
+          field: 'fixVersion',
+          previous: '1.2',
+          value: '',
+        })
+      ).status,
+      200,
+    );
+    await f.close();
+    await f.open();
+    bugs = (await f.request('bugs')).data;
+    assert.equal(
+      bugs.find((bug) => bug.id === backfill.id).fixVersion,
+      '',
+      'restart must not restore intentionally cleared values',
+    );
+    const backup = (await f.request('backup')).data;
+    assert.equal(
+      backup.bugs.find((bug) => bug.id === conflict.id).customFields.custom_fix,
+      '1.5',
+    );
+    assert.equal(
+      (await target.request('import', 'POST', backup)).status,
+      200,
+      'migrated backups remain compatible with migrated workspace',
+    );
+    assert.ok(
+      (await target.request('bugs')).data.some(
+        (bug) =>
+          bug.title === backfill.title &&
+          bug.fixVersion === '' &&
+          bug.customFields.custom_fix === '1.2',
+      ),
+    );
+  } finally {
+    await f.destroy();
+    await target.destroy();
+  }
+});
+
+test('ambiguous duplicate Fix version fields are left intact', async () => {
+  const f = await fixture();
+  try {
+    await f.open();
+    const fields = (await f.request('fields')).data;
+    for (const key of ['custom_fix_a', 'custom_fix_b'])
+      fields.push({
+        key,
+        label: 'Fix version',
+        type: 'text',
+        enabled: true,
+        required: false,
+        builtin: false,
+        options: [],
+      });
+    assert.equal((await f.request('fields', 'PUT', fields)).status, 200);
+    assert.equal(
+      (
+        await f.request('bugs', 'POST', {
+          ...report,
+          customFields: { custom_fix_a: '1.0', custom_fix_b: '2.0' },
+        })
+      ).status,
+      201,
+    );
+    await f.close();
+    await f.open();
+    assert.equal((await f.request('bugs')).data[0].fixVersion, '');
+    assert.deepEqual((await f.request('bugs')).data[0].customFields, {
+      custom_fix_a: '1.0',
+      custom_fix_b: '2.0',
+    });
+    assert.ok(
+      (await f.request('fields')).data
+        .filter((field) => field.key.startsWith('custom_fix'))
+        .every((field) => field.enabled),
+    );
+  } finally {
+    await f.destroy();
+  }
+});
+
+test('quick report creation tokens make retries idempotent and are excluded from backup copies', async () => {
+  const f = await fixture(),
+    target = await fixture();
+  try {
+    await f.open();
+    await target.open();
+    const input = {
+      title: 'One captured problem',
+      project: 'Project1',
+      status: 'Open',
+      priority: 'Medium',
+      quickReport: true,
+      creationToken: '88888888-aaaa-4bbb-8ccc-123456789abc',
+    };
+    for (const invalid of [
+      { creationToken: '' },
+      { creationToken: 1 },
+      { creationToken: 'not-a-uuid' },
+      { quickReport: false },
+      { title: '' },
+    ])
+      assert.equal(
+        (await f.request('bugs', 'POST', { ...input, ...invalid })).status,
+        400,
+      );
+    const requests = await Promise.all(
+      Array.from({ length: 3 }, () => f.request('bugs', 'POST', input)),
+    );
+    assert.deepEqual(requests.map((r) => r.status).sort(), [200, 200, 201]);
+    const saved = requests[0].data;
+    assert.ok(requests.every((r) => r.data.id === saved.id));
+    assert.ok(
+      requests
+        .filter((r) => r.status === 200)
+        .every((r) => r.data.creationReplayed === true),
+    );
+    assert.ok(
+      !('creationReplayed' in requests.find((r) => r.status === 201).data),
+    );
+    assert.equal((await f.request('bugs')).data.length, 1);
+    assert.ok(!('creationReplayed' in (await f.request('bugs')).data[0]));
+    const edited = await f.request(`bugs/${saved.id}`, 'PUT', {
+      ...saved,
+      title: 'Investigated problem',
+      expectedCreatedAt: saved.createdAt,
+    });
+    assert.equal(edited.status, 200);
+    const mismatch = await f.request(`bugs/${saved.id}`, 'PUT', {
+      ...edited.data,
+      title: 'Wrong issue',
+      expectedCreatedAt: '1999-01-01T00:00:00.000Z',
+    });
+    assert.equal(mismatch.status, 409);
+    assert.equal(
+      (await f.request('bugs')).data[0].title,
+      'Investigated problem',
+    );
+    await f.close();
+    await f.open();
+    const retried = await f.request('bugs', 'POST', {
+      ...input,
+      title: 'Retry must not overwrite',
+      creationToken: input.creationToken.toUpperCase(),
+    });
+    assert.equal(retried.status, 200);
+    assert.equal(retried.data.creationReplayed, true);
+    assert.equal(retried.data.id, saved.id);
+    assert.equal(retried.data.title, 'Investigated problem');
+    assert.equal(retried.data.history.length, edited.data.history.length);
+    const backup = (await f.request('backup')).data;
+    assert.ok(!('creationToken' in backup.bugs[0]));
+    assert.ok(!('creationAccountId' in backup.bugs[0]));
+    assert.ok(!('creationReplayed' in backup.bugs[0]));
+    assert.equal((await f.request('import', 'POST', backup)).status, 200);
+    assert.equal(
+      (await f.request('bugs', 'POST', input)).data.id,
+      saved.id,
+      'imported copy cannot claim the original token',
+    );
+    // Older/hand-edited backups must not inject tokens into a destination.
+    backup.bugs[0].creationToken = input.creationToken;
+    backup.bugs[0].creationAccountId = null;
+    assert.equal((await target.request('import', 'POST', backup)).status, 200);
+    assert.ok(!('creationToken' in (await target.request('bugs')).data[0]));
+    assert.equal((await target.request('bugs', 'POST', input)).status, 201);
+    assert.equal((await target.request('bugs')).data.length, 2);
+  } finally {
+    await f.destroy();
+    await target.destroy();
+  }
+});
+
+test('field type changes retain existing values and reject incompatible conversions', async () => {
+  const f = await fixture();
+  try {
+    await f.open();
+    const bug = (await f.request('bugs', 'POST', report)).data;
+    let fields = (await f.request('fields')).data;
+    const repro = fields.find((field) => field.key === 'reproRate');
+    repro.type = 'select';
+    repro.options = ['Always', 'Sometimes'];
+    assert.equal((await f.request('fields', 'PUT', fields)).status, 200);
+    fields = (await f.request('fields')).data;
+    assert.ok(
+      fields
+        .find((field) => field.key === 'reproRate')
+        .options.includes(report.reproRate),
+    );
+    assert.equal((await f.request('bugs')).data[0].reproRate, report.reproRate);
+    assert.equal(
+      (
+        await f.request(`bugs/${bug.id}`, 'PATCH', {
+          field: 'reproRate',
+          previous: report.reproRate,
+          value: 'Always',
+        })
+      ).status,
+      200,
+    );
+    fields.find((field) => field.key === 'reproRate').type = 'text';
+    assert.equal((await f.request('fields', 'PUT', fields)).status, 200);
+    fields.push({
+      key: 'custom_conversion',
+      label: 'Reference',
+      type: 'text',
+      options: [],
+      required: false,
+      enabled: true,
+      builtin: false,
+      issueTypes: [],
+    });
+    assert.equal((await f.request('fields', 'PUT', fields)).status, 200);
+    assert.equal(
+      (
+        await f.request(`bugs/${bug.id}`, 'PATCH', {
+          field: 'custom_conversion',
+          previous: '',
+          value: 'Not numeric',
+        })
+      ).status,
+      200,
+    );
+    fields.find((field) => field.key === 'custom_conversion').type = 'number';
+    assert.equal((await f.request('fields', 'PUT', fields)).status, 400);
+    fields.find((field) => field.key === 'custom_conversion').type = 'select';
+    assert.equal((await f.request('fields', 'PUT', fields)).status, 200);
+    fields = (await f.request('fields')).data;
+    assert.deepEqual(
+      fields.find((field) => field.key === 'custom_conversion').options,
+      ['Not numeric'],
+    );
+    fields.find((field) => field.key === 'project').type = 'select';
+    assert.equal((await f.request('fields', 'PUT', fields)).status, 400);
+  } finally {
+    await f.destroy();
+  }
+});
+
+test('affected versions are remembered per project and retained in backups after clearing an issue', async () => {
+  const f = await fixture(),
+    restored = await fixture();
+  try {
+    await f.open();
+    await restored.open();
+    const first = (
+      await f.request('bugs', 'POST', { ...report, version: 'Release-1' })
+    ).data;
+    const reused = (
+      await f.request('bugs', 'POST', { ...report, version: 'release-1' })
+    ).data;
+    assert.equal(reused.version, 'Release-1');
+    await f.request('bugs', 'POST', {
+      ...report,
+      project: 'Other app',
+      version: '2.0',
+    });
+    let projects = (await f.request('projects')).data;
+    assert.deepEqual(projects.find((p) => p.name === report.project).versions, [
+      'Release-1',
+    ]);
+    assert.deepEqual(projects.find((p) => p.name === 'Other app').versions, [
+      '2.0',
+    ]);
+    await f.request(`bugs/${first.id}`, 'PATCH', {
+      field: 'version',
+      previous: 'Release-1',
+      value: '',
+    });
+    await f.request(`bugs/${reused.id}`, 'PATCH', {
+      field: 'version',
+      previous: 'Release-1',
+      value: '',
+    });
+    const backup = (await f.request('backup')).data;
+    assert.equal(
+      (await restored.request('import', 'POST', backup)).status,
+      200,
+    );
+    projects = (await restored.request('projects')).data;
+    assert.deepEqual(projects.find((p) => p.name === report.project).versions, [
+      'Release-1',
+    ]);
+    assert.deepEqual(projects.find((p) => p.name === 'Other app').versions, [
+      '2.0',
+    ]);
+  } finally {
+    await f.destroy();
+    await restored.destroy();
   }
 });

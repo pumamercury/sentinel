@@ -1,5 +1,7 @@
 'use client';
-import { priorityLabel } from '../lib/priority';
+import { InlineChoice } from './inline-choice';
+import { useAccess } from './account-gate';
+import { AccountPicker } from './account-picker';
 
 import { IssueTypeBadge } from './issue-identity';
 import { Pencil } from 'lucide-react';
@@ -25,6 +27,7 @@ export function InlineField({
   project: string;
   onRefresh: () => Promise<void>;
 }) {
+  const { enabled: accountsEnabled } = useAccess();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
   const [previous, setPrevious] = useState(value);
@@ -32,6 +35,21 @@ export function InlineField({
   const [error, setError] = useState('');
   const saving = useRef(false);
   const cancelled = useRef(false);
+  if (
+    field.type === 'select' ||
+    (accountsEnabled && ['assignee', 'reporter'].includes(field.key))
+  )
+    return (
+      <InlineChoice
+        issueId={issueId}
+        field={field}
+        value={value}
+        accounts={
+          accountsEnabled && ['assignee', 'reporter'].includes(field.key)
+        }
+        onRefresh={onRefresh}
+      />
+    );
   if (!editing) {
     const display = (
       <button
@@ -158,6 +176,22 @@ export function InlineField({
             required={field.required}
             onChange={setDraft}
           />
+        ) : ['assignee', 'reporter'].includes(field.key) ? (
+          <AccountPicker
+            value={draft}
+            label={field.label}
+            required={field.required}
+            onChange={setDraft}
+          />
+        ) : field.key === 'version' ? (
+          <ComponentPicker
+            kind="version"
+            options={projects.find((p) => p.name === project)?.versions ?? []}
+            value={draft}
+            label={field.label}
+            required={field.required}
+            onChange={setDraft}
+          />
         ) : field.key === 'component' ? (
           <ComponentPicker
             options={projects.find((p) => p.name === project)?.components ?? []}
@@ -208,24 +242,6 @@ export function InlineField({
                 maxLength={20000}
                 onChange={(e) => setDraft(e.target.value)}
               />
-            ) : field.type === 'select' ? (
-              <select
-                autoFocus
-                value={draft}
-                required={field.required}
-                onChange={(e) => setDraft(e.target.value)}
-              >
-                <option value="" disabled={field.required}>
-                  Select…
-                </option>
-                {[
-                  ...new Set([...field.options, ...(draft ? [draft] : [])]),
-                ].map((option) => (
-                  <option key={option} value={option}>
-                    {field.key === 'priority' ? priorityLabel(option) : option}
-                  </option>
-                ))}
-              </select>
             ) : (
               <input
                 autoFocus

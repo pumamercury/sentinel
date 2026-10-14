@@ -1,4 +1,5 @@
 'use client';
+import { cloudEnabled } from '../lib/cloud';
 import { useEffect, useRef, useState } from 'react';
 import {
   Paperclip,
@@ -31,7 +32,13 @@ function Thumbnail({ file, url }: { file: Attachment; url: string }) {
     />
   );
 }
-export function Attachments({ bugId }: { bugId: number }) {
+export function Attachments({
+  bugId,
+  onRefresh,
+}: {
+  bugId: number;
+  onRefresh?: () => Promise<void>;
+}) {
   const [progress, setProgress] = useState(''),
     [files, setFiles] = useState<Attachment[]>([]),
     [error, setError] = useState(''),
@@ -44,6 +51,9 @@ export function Attachments({ bugId }: { bugId: number }) {
     video = useRef<HTMLVideoElement>(null),
     closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const url = (f: Attachment, preview = false) =>
+    (preview
+      ? (files.find((x) => x.id === f.id)?.previewUrl ?? f.previewUrl)
+      : (files.find((x) => x.id === f.id)?.downloadUrl ?? f.downloadUrl)) ??
     `/api/bugs/${bugId}/attachments/${f.id}${preview ? '?preview=1' : ''}`;
   const load = async () =>
     setFiles(await api<Attachment[]>(`bugs/${bugId}/attachments`));
@@ -52,6 +62,15 @@ export function Attachments({ bugId }: { bugId: number }) {
     load()
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
+    if (cloudEnabled) {
+      const timer = setInterval(
+        () => {
+          void load().catch((e) => setError(e.message));
+        },
+        10 * 60 * 1000,
+      );
+      return () => clearInterval(timer);
+    }
   }, [bugId]);
   useEffect(() => {
     if (selected) viewer.current?.showModal();
@@ -116,6 +135,7 @@ export function Attachments({ bugId }: { bugId: number }) {
       );
     } finally {
       setBusy(false);
+      await onRefresh?.().catch((e) => setError(e.message));
     }
   }
   async function remove(file: Attachment) {
@@ -125,6 +145,7 @@ export function Attachments({ bugId }: { bugId: number }) {
     try {
       await api(`bugs/${bugId}/attachments/${file.id}`, 'DELETE');
       await load();
+      await onRefresh?.();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -209,7 +230,7 @@ export function Attachments({ bugId }: { bugId: number }) {
         </ul>
       )}
       <label className="upload-field">
-        {busy ? 'Uploading ' + progress : 'Add attachments'}
+        {busy ? 'Uploading & optimizing ' + progress : 'Add attachments'}
         <input
           type="file"
           multiple
@@ -220,6 +241,11 @@ export function Attachments({ bugId }: { bugId: number }) {
           }}
         />
       </label>
+      <p className="muted">
+        {cloudEnabled
+          ? 'Screenshots are optimized at full resolution. Direct video uploads keep their original quality; the Mac companion compresses supported videos.'
+          : 'Images and videos are automatically compressed when smaller. Screenshots keep their full resolution.'}
+      </p>
       <dialog
         ref={viewer}
         aria-labelledby="attachment-viewer-title"

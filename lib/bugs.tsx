@@ -1,3 +1,4 @@
+import { cloudEnabled, cloudApi, cloudUpload } from './cloud';
 import { priorityLabel } from './priority';
 export const statuses = [
   'Open',
@@ -31,8 +32,18 @@ export type Report = {
   priority: string;
   severity: string;
 };
-export type Entry = { at: string; text: string };
+export type Entry = {
+  at: string;
+  text: string;
+  actor?: { id?: number; email: string };
+};
+export type Member = { id: number; email: string; disabled: number };
 export type Issue = Report & {
+  issueKey?: string;
+  issueNumber?: number;
+  quickReport?: boolean;
+  deletedAt?: string;
+  deletedBy?: Entry['actor'];
   id: number;
   createdAt: string;
   updatedAt: string;
@@ -45,7 +56,7 @@ export const blank: Report = {
   component: '',
   customFields: {},
   title: '',
-  project: 'My project',
+  project: '',
   description: '',
   steps: '',
   expected: '',
@@ -65,6 +76,7 @@ export const blank: Report = {
 };
 export type Project = {
   components?: string[];
+  versions?: string[];
   id: number;
   name: string;
   description: string;
@@ -72,6 +84,8 @@ export type Project = {
   image: string;
 };
 export type Attachment = {
+  downloadUrl?: string;
+  previewUrl?: string;
   previewType: 'image' | 'video' | null;
   id: string;
   name: string;
@@ -83,6 +97,7 @@ export function uploadAttachment(
   file: File,
   onProgress?: (percent: number) => void,
 ): Promise<Attachment> {
+  if (cloudEnabled) return cloudUpload<Attachment>(bugId, file, onProgress);
   if (file.size > 250_000_000)
     return Promise.reject(Error('Each attachment must be at most 250 MB.'));
   return new Promise((resolve, reject) => {
@@ -112,12 +127,15 @@ export async function api<T = unknown>(
   method = 'GET',
   body?: unknown,
 ) {
+  if (cloudEnabled) return cloudApi<T & { error?: string }>(path, method, body);
   const response = await fetch('/api/' + path, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = (await response.json()) as T & { error?: string };
+  if (response.status === 401)
+    window.dispatchEvent(new Event('sentinel-session-expired'));
   if (!response.ok)
     throw Error(data.error || 'Unable to complete this action.');
   return data;

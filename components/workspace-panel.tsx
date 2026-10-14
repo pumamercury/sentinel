@@ -1,21 +1,93 @@
 'use client';
 import { priorityLabel } from '../lib/priority';
 
-import { useRef, useState } from 'react';
-import { Plus, Save, ArrowUp, ArrowDown, AppWindow } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import {
+  Plus,
+  Save,
+  ArrowUp,
+  ArrowDown,
+  AppWindow,
+  ChevronDown,
+  Paperclip,
+} from 'lucide-react';
 import { api, type Project } from '../lib/bugs';
 import {
   type FieldDefinition,
   lockedFields,
+  fieldTypeOptions,
   statusCategory,
+  fieldApplies,
+  fieldLabel,
 } from '../lib/field-schema.mjs';
 import { ProjectBadge } from './project-badge';
+import './workspace-settings.css';
 type Props = {
   mode: 'projects' | 'admin';
   initialProjectId?: number | null;
   projects: Project[];
   fields: FieldDefinition[];
   onRefresh: () => Promise<void>;
+  onDirtyChange?: (dirty: boolean) => void;
+};
+const fieldGroups = [
+  {
+    key: 'basics',
+    label: 'Report basics',
+    description: 'Identity and classification',
+    keys: [
+      'title',
+      'project',
+      'issueType',
+      'status',
+      'priority',
+      'description',
+    ],
+  },
+  {
+    key: 'reproduction',
+    label: 'Reproduction & evidence',
+    description: 'What happened and how to repeat it',
+    keys: ['steps', 'expected', 'actual', 'severity', 'reproRate'],
+  },
+  {
+    key: 'context',
+    label: 'Testing context',
+    description: 'App area, device and versions',
+    keys: ['component', 'environment', 'version', 'fixVersion'],
+  },
+  {
+    key: 'planning',
+    label: 'People & planning',
+    description: 'Ownership and follow-up',
+    keys: [
+      'reporter',
+      'assignee',
+      'dueDate',
+      'labels',
+      'solution',
+      'acceptance',
+    ],
+  },
+  {
+    key: 'custom',
+    label: 'Custom fields',
+    description: 'Extra details for your workspace',
+    keys: [] as string[],
+  },
+];
+function groupFor(field: FieldDefinition) {
+  if (!field.builtin) return 'custom';
+  return (
+    fieldGroups.find((group) => group.keys.includes(field.key))?.key ?? 'custom'
+  );
+}
+const fieldTypeLabels = {
+  text: 'Short text',
+  textarea: 'Long text',
+  select: 'Dropdown',
+  date: 'Date',
+  number: 'Number',
 };
 export function WorkspacePanel({
   mode,
@@ -23,6 +95,7 @@ export function WorkspacePanel({
   fields,
   onRefresh,
   initialProjectId,
+  onDirtyChange,
 }: Props) {
   const [draft, setDraft] = useState<Partial<Project> | null>(() =>
       mode === 'projects'
@@ -33,6 +106,28 @@ export function WorkspacePanel({
     [error, setError] = useState(''),
     [notice, setNotice] = useState(''),
     [busy, setBusy] = useState(false);
+  const [savedDefinitions, setSavedDefinitions] = useState(fields);
+  const fieldDirty =
+    JSON.stringify(definitions) !== JSON.stringify(savedDefinitions);
+  const changedFields = definitions.filter(
+    (field, index) =>
+      JSON.stringify(field) !==
+        JSON.stringify(
+          savedDefinitions.find((saved) => saved.key === field.key),
+        ) || savedDefinitions[index]?.key !== field.key,
+  ).length;
+  const remoteSnapshot = JSON.stringify(fields);
+  const [receivedSnapshot, setReceivedSnapshot] = useState(remoteSnapshot);
+  if (receivedSnapshot !== remoteSnapshot) {
+    setReceivedSnapshot(remoteSnapshot);
+    if (!fieldDirty) {
+      setDefinitions(fields);
+      setSavedDefinitions(fields);
+    }
+  }
+  const [openGroups, setOpenGroups] = useState<string[]>(['basics']);
+  const [previewMode, setPreviewMode] = useState<'quick' | 'full'>('quick');
+  const [previewType, setPreviewType] = useState('Bug');
   const [newLabel, setNewLabel] = useState(''),
     [newType, setNewType] = useState<FieldDefinition['type']>('text'),
     [newOptions, setNewOptions] = useState('');
@@ -42,11 +137,26 @@ export function WorkspacePanel({
         (key) => p?.[key as keyof Project] ?? '',
       ),
     );
-  const projectBaseline = useRef(projectSnapshot(draft));
-  const projectDirty = projectSnapshot(draft) !== projectBaseline.current;
+  const [projectBaseline, setProjectBaseline] = useState(
+    projectSnapshot(draft),
+  );
+  const projectDirty = projectSnapshot(draft) !== projectBaseline;
+  const dirty = mode === 'projects' ? projectDirty : fieldDirty;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
   const [fieldSearch, setFieldSearch] = useState('');
   const [imageBusy, setImageBusy] = useState(false);
-  async function saveProject(e: React.FormEvent) {
+  async function saveProject(e: React.SubmitEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!draft) return;
     setBusy(true);
@@ -59,7 +169,7 @@ export function WorkspacePanel({
       );
       await onRefresh();
       setDraft(saved);
-      projectBaseline.current = projectSnapshot(saved);
+      setProjectBaseline(projectSnapshot(saved));
       setNotice(
         'Project saved. Its name and image are updated in all linked issues.',
       );
@@ -76,7 +186,7 @@ export function WorkspacePanel({
     )
       return;
     setDraft(p);
-    projectBaseline.current = projectSnapshot(p);
+    setProjectBaseline(projectSnapshot(p));
     setError('');
     setNotice('');
   }
@@ -92,7 +202,10 @@ export function WorkspacePanel({
         throw Error('Use a PNG, JPEG or WebP image up to 2 MB.');
       const data = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
+        reader.onload = () =>
+          typeof reader.result === 'string'
+            ? resolve(reader.result)
+            : reject(Error('Unable to read image.'));
         reader.onerror = () => reject(Error('Unable to read image.'));
         reader.readAsDataURL(file);
       });
@@ -104,11 +217,13 @@ export function WorkspacePanel({
     }
   }
   function change(index: number, patch: Partial<FieldDefinition>) {
+    setNotice('');
     setDefinitions((d) =>
       d.map((f, i) => (i === index ? { ...f, ...patch } : f)),
     );
   }
   function move(index: number, delta: number) {
+    setNotice('');
     setDefinitions((d) => {
       const copy = [...d];
       [copy[index], copy[index + delta]] = [copy[index + delta], copy[index]];
@@ -147,14 +262,43 @@ export function WorkspacePanel({
     setNewLabel('');
     setNewOptions('');
     setError('');
+    setNotice('Custom field added to your draft. Save fields to apply it.');
+    setFieldSearch('');
+    setOpenGroups((groups) => [...new Set([...groups, 'custom'])]);
+  }
+  function applyPreset(preset: 'flexible' | 'structured') {
+    const required =
+      preset === 'structured'
+        ? ['issueType', 'description', 'steps', 'expected', 'actual']
+        : [];
+    setDefinitions((current) =>
+      current.map((field) =>
+        !field.builtin || lockedFields.includes(field.key)
+          ? field
+          : {
+              ...field,
+              required: field.enabled && required.includes(field.key),
+            },
+      ),
+    );
+    setPreviewMode('full');
+    setError('');
+    setNotice(
+      `${preset === 'flexible' ? 'Flexible details' : 'Structured reports'} applied to your draft. Review the form preview, then save when ready.`,
+    );
+  }
+  function discardFields() {
+    setDefinitions(savedDefinitions);
+    setError('');
+    setNotice('Unsaved field changes discarded.');
   }
   async function saveFields() {
     setBusy(true);
     setError('');
     try {
-      setDefinitions(
-        await api<FieldDefinition[]>('fields', 'PUT', definitions),
-      );
+      const saved = await api<FieldDefinition[]>('fields', 'PUT', definitions);
+      setDefinitions(saved);
+      setSavedDefinitions(saved);
       await onRefresh();
       setNotice('Field configuration saved for all issues.');
     } catch (e) {
@@ -163,12 +307,31 @@ export function WorkspacePanel({
       setBusy(false);
     }
   }
+  const matchesSearch = (field: FieldDefinition) =>
+    `${field.label} ${field.type} ${fieldTypeLabels[field.type]}`
+      .toLowerCase()
+      .includes(fieldSearch.trim().toLowerCase());
+  const issueTypes =
+    definitions
+      .find((field) => field.key === 'issueType')
+      ?.options.filter(Boolean) ?? [];
+  const effectivePreviewType = issueTypes.includes(previewType)
+    ? previewType
+    : (issueTypes[0] ?? 'Bug');
+  const fullPreviewFields = definitions.filter((field) =>
+    fieldApplies(field, effectivePreviewType),
+  );
+  const quickPreviewFields = ['project', 'title', 'description']
+    .map((key) => fullPreviewFields.find((field) => field.key === key))
+    .filter((field): field is FieldDefinition => Boolean(field));
+  const previewFields =
+    previewMode === 'quick' ? quickPreviewFields : fullPreviewFields;
   return (
     <>
-      <div className="breadcrumb">
+      <div className="breadcrumb settings-breadcrumb">
         Workspace / Admin / {mode === 'projects' ? 'Projects' : 'Issue fields'}
       </div>
-      <header>
+      <header className="settings-header">
         <div>
           <p className="eyebrow">WORKSPACE SETTINGS</p>
           <h1>{mode === 'projects' ? 'Projects' : 'Issue fields'}</h1>
@@ -189,9 +352,25 @@ export function WorkspacePanel({
             <Plus size={18} /> New project
           </button>
         ) : (
-          <button className="primary" disabled={busy} onClick={saveFields}>
-            <Save size={18} /> Save fields
-          </button>
+          <div className="settings-save-actions">
+            <output className={fieldDirty ? 'settings-unsaved' : 'muted'}>
+              {fieldDirty
+                ? `${changedFields} field${changedFields === 1 ? '' : 's'} with unsaved changes`
+                : 'All changes saved'}
+            </output>
+            {fieldDirty && (
+              <button disabled={busy} onClick={discardFields}>
+                Discard changes
+              </button>
+            )}
+            <button
+              className="primary"
+              disabled={busy || !fieldDirty}
+              onClick={saveFields}
+            >
+              <Save size={18} /> {busy ? 'Saving…' : 'Save fields'}
+            </button>
+          </div>
         )}
       </header>
       {error && (
@@ -199,11 +378,7 @@ export function WorkspacePanel({
           {error}
         </div>
       )}
-      {notice && (
-        <div className="notice" role="status">
-          {notice}
-        </div>
-      )}
+      {notice && <output className="notice settings-notice">{notice}</output>}
       {mode === 'projects' ? (
         <div className="project-editor-grid">
           <section className="project-list">
@@ -311,253 +486,541 @@ export function WorkspacePanel({
           </section>
         </div>
       ) : (
-        <>
-          <p className="notice">
-            Hide a field to remove it from the form and details without losing
-            saved values. Title, project, status, and priority stay required.
-            Reorder fields with the arrows.
-          </p>
-          <div className="field-admin-search">
-            <label>
-              Find a field
-              <input
-                value={fieldSearch}
-                onChange={(e) => setFieldSearch(e.target.value)}
-                placeholder="Search labels or field types…"
-              />
-            </label>
-            <span className="muted">
-              {definitions.filter((f) => f.enabled).length} visible ·{' '}
-              {definitions.length} total
-            </span>
-          </div>
-          <div className="field-admin-cards">
-            {definitions.map((f, i) => (
-              <article
-                className="field-admin-card"
-                key={f.key}
-                hidden={
-                  !(f.label + ' ' + f.type)
-                    .toLowerCase()
-                    .includes(fieldSearch.toLowerCase())
-                }
-              >
-                <div className="field-admin-top">
-                  <div className="field-admin-name">
-                    <label>
-                      Field name
-                      <input
-                        aria-label={'Label for ' + f.label}
-                        maxLength={80}
-                        value={f.label}
-                        disabled={busy}
-                        onChange={(e) => change(i, { label: e.target.value })}
-                      />
-                      <small className="id">
-                        {f.builtin ? 'Built-in' : 'Custom'}
-                      </small>
-                    </label>
-                    <span className="muted">
-                      {
-                        {
-                          text: 'Short text',
-                          textarea: 'Long text',
-                          select: 'Dropdown',
-                          date: 'Date',
-                          number: 'Number',
-                        }[f.type]
-                      }
-                      {f.type === 'select'
-                        ? ' · ' + f.options.length + ' options'
-                        : ''}
-                    </span>
-                  </div>
-                  <div className="field-admin-order">
-                    <div className="field-order">
-                      <button
-                        disabled={busy || i === 0}
-                        aria-label={'Move ' + f.label + ' up'}
-                        onClick={() => move(i, -1)}
-                      >
-                        <ArrowUp size={16} />
-                      </button>
-                      <button
-                        disabled={busy || i === definitions.length - 1}
-                        aria-label={'Move ' + f.label + ' down'}
-                        onClick={() => move(i, 1)}
-                      >
-                        <ArrowDown size={16} />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                <div className="field-admin-settings">
-                  <label>
-                    <input
-                      type="checkbox"
-                      aria-label={'Show ' + f.label}
-                      checked={f.enabled}
-                      disabled={busy || lockedFields.includes(f.key)}
-                      onChange={(e) => change(i, { enabled: e.target.checked })}
-                    />
-                    Visible
-                  </label>
-                  <label>
-                    <input
-                      type="checkbox"
-                      aria-label={'Require ' + f.label}
-                      checked={f.required}
-                      disabled={busy || lockedFields.includes(f.key)}
-                      onChange={(e) =>
-                        change(i, { required: e.target.checked })
-                      }
-                    />
-                    Required
-                  </label>
-                  {lockedFields.includes(f.key) && (
-                    <span className="muted">
-                      Essential field — always visible and required
-                    </span>
-                  )}
-                </div>
-
-                <details className="field-advanced">
-                  <summary>Options &amp; applicability</summary>
-                  {f.key === 'priority' && (
-                    <p className="muted">
-                      {f.options.map(priorityLabel).join(' · ')}
-                    </p>
-                  )}
-                  {f.type === 'select' && (
-                    <label>
-                      Options — one per line
-                      <textarea
-                        aria-label={'Options for ' + f.label}
-                        value={f.options.join('\n')}
-                        disabled={busy}
-                        onChange={(e) =>
-                          change(i, {
-                            options: e.target.value.split('\n'),
-                          })
-                        }
-                      />
-                    </label>
-                  )}
-                  {f.key === 'status' &&
-                    [...new Set(f.options.filter(Boolean))].map((option) => (
-                      <label className="status-category" key={option}>
-                        {option}
-                        <select
-                          aria-label={`Category for ${option}`}
-                          disabled={busy}
-                          value={
-                            f.categories?.[option] ?? statusCategory(option)
-                          }
-                          onChange={(e) =>
-                            change(i, {
-                              categories: {
-                                ...f.categories,
-                                [option]: e.target.value as
-                                  | 'open'
-                                  | 'in-progress'
-                                  | 'completed',
-                              },
-                            })
-                          }
-                        >
-                          <option value="open">Open</option>
-                          <option value="in-progress">In progress</option>
-                          <option value="completed">Completed</option>
-                        </select>
-                      </label>
-                    ))}
-                  {!lockedFields.includes(f.key) && f.key !== 'issueType' && (
-                    <fieldset className="field-scope-choices" disabled={busy}>
-                      <legend>Show for issue types</legend>
-                      <p className="muted">
-                        Leave all unchecked to show for every issue type.
-                      </p>
-                      {(
-                        definitions.find((field) => field.key === 'issueType')
-                          ?.options ?? []
-                      )
-                        .filter(Boolean)
-                        .map((type) => (
-                          <label key={type}>
-                            <input
-                              type="checkbox"
-                              checked={(f.issueTypes ?? []).includes(type)}
-                              onChange={(e) =>
-                                change(i, {
-                                  issueTypes: e.target.checked
-                                    ? [...(f.issueTypes ?? []), type]
-                                    : (f.issueTypes ?? []).filter(
-                                        (t) => t !== type,
-                                      ),
-                                })
-                              }
-                            />
-                            {type}
-                          </label>
-                        ))}
-                    </fieldset>
-                  )}
-                </details>
-              </article>
-            ))}
-            {!definitions.some((f) =>
-              (f.label + ' ' + f.type)
-                .toLowerCase()
-                .includes(fieldSearch.toLowerCase()),
-            ) && <p className="muted">No matching fields.</p>}
-          </div>
-          <section className="detail-panel new-field">
-            <h2>Add custom field</h2>
-            <div className="fields">
-              <label>
-                Label
-                <input
-                  value={newLabel}
-                  maxLength={80}
-                  disabled={busy}
-                  onChange={(e) => setNewLabel(e.target.value)}
-                />
-              </label>
-              <label>
-                Type
-                <select
-                  value={newType}
-                  disabled={busy}
-                  onChange={(e) =>
-                    setNewType(e.target.value as FieldDefinition['type'])
-                  }
-                >
-                  {['text', 'textarea', 'select', 'number', 'date'].map((t) => (
-                    <option key={t}>{t}</option>
-                  ))}
-                </select>
-              </label>
-              {newType === 'select' && (
-                <label>
-                  Options (comma separated)
-                  <input
-                    value={newOptions}
-                    disabled={busy}
-                    onChange={(e) => setNewOptions(e.target.value)}
-                  />
-                </label>
-              )}
+        <div className="workspace-field-settings">
+          <section
+            className="settings-presets"
+            aria-labelledby="settings-presets-title"
+          >
+            <div>
+              <h2 id="settings-presets-title">A useful starting point</h2>
+              <p className="muted">
+                Try a preset, adjust the fields, then save. Labels, options,
+                visibility and custom fields stay as you set them.
+              </p>
             </div>
-            <div className="actions">
-              <button disabled={busy} onClick={addField}>
-                <Plus size={16} /> Add field
+            <div className="settings-preset-options">
+              <button disabled={busy} onClick={() => applyPreset('flexible')}>
+                <strong>Flexible details</strong>
+                <span>Keep supporting details optional.</span>
+              </button>
+              <button disabled={busy} onClick={() => applyPreset('structured')}>
+                <strong>Structured reports</strong>
+                <span>
+                  Require a description and reproduction details in full
+                  reports.
+                </span>
               </button>
             </div>
-            <p className="muted">
-              Then choose Save fields to apply your changes.
-            </p>
           </section>
-        </>
+          <div className="settings-editor-layout">
+            <section
+              className="settings-field-editor"
+              aria-label="Field configuration"
+            >
+              <div className="field-admin-search">
+                <label>
+                  Find a field
+                  <input
+                    value={fieldSearch}
+                    onChange={(e) => setFieldSearch(e.target.value)}
+                    placeholder="Search labels or field types…"
+                  />
+                </label>
+                <span className="muted">
+                  {definitions.filter((f) => f.enabled).length} visible ·{' '}
+                  {definitions.length} total
+                </span>
+              </div>
+              <p className="settings-help muted">
+                Required fields apply to full reports. Quick reports can be
+                filled in later. Hidden fields keep their saved values. Open a
+                field to edit it or change its order in the full form.
+              </p>
+              <div className="settings-field-groups">
+                {fieldGroups.map((group) => {
+                  const groupFields = definitions.filter(
+                    (field) =>
+                      groupFor(field) === group.key && matchesSearch(field),
+                  );
+                  if (!groupFields.length) return null;
+                  return (
+                    <details
+                      className="settings-field-group"
+                      key={group.key}
+                      open={
+                        Boolean(fieldSearch.trim()) ||
+                        openGroups.includes(group.key)
+                      }
+                      onToggle={(event) => {
+                        if (fieldSearch.trim()) return;
+                        const open = event.currentTarget.open;
+                        setOpenGroups((groups) =>
+                          open
+                            ? [...new Set([...groups, group.key])]
+                            : groups.filter((key) => key !== group.key),
+                        );
+                      }}
+                    >
+                      <summary>
+                        <span>
+                          <strong>{group.label}</strong>
+                          <small>{group.description}</small>
+                        </span>
+                        <span className="settings-group-count">
+                          {groupFields.length}
+                          <ChevronDown size={16} aria-hidden="true" />
+                        </span>
+                      </summary>
+                      <div className="settings-group-fields">
+                        {groupFields.map((f) => {
+                          const i = definitions.findIndex(
+                            (field) => field.key === f.key,
+                          );
+                          return (
+                            <details
+                              className="field-admin-card settings-field-row"
+                              key={f.key}
+                            >
+                              <summary>
+                                <span className="settings-field-summary-name">
+                                  {f.label || 'Unnamed field'}
+                                  <small>{fieldTypeLabels[f.type]}</small>
+                                </span>
+                                <span className="settings-field-summary-state">
+                                  {!f.enabled
+                                    ? 'Hidden'
+                                    : f.required
+                                      ? 'Required'
+                                      : 'Optional'}
+                                  <ChevronDown size={15} aria-hidden="true" />
+                                </span>
+                              </summary>
+                              <div className="settings-field-row-content">
+                                <div className="field-admin-top">
+                                  <div className="field-admin-name">
+                                    <label>
+                                      Field name
+                                      <input
+                                        aria-label={'Label for ' + f.label}
+                                        maxLength={80}
+                                        value={f.label}
+                                        disabled={busy}
+                                        onChange={(e) =>
+                                          change(i, { label: e.target.value })
+                                        }
+                                      />
+                                      <small className="id">
+                                        {f.builtin ? 'Built-in' : 'Custom'}
+                                        {' · Form position ' + (i + 1)}
+                                      </small>
+                                    </label>
+                                    <label>
+                                      Field type
+                                      <select
+                                        aria-label={'Type for ' + f.label}
+                                        value={f.type}
+                                        disabled={
+                                          busy ||
+                                          fieldTypeOptions(f).length === 1
+                                        }
+                                        onChange={(e) =>
+                                          change(i, {
+                                            type: e.target
+                                              .value as FieldDefinition['type'],
+                                          })
+                                        }
+                                      >
+                                        {fieldTypeOptions(f).map((type) => (
+                                          <option key={type} value={type}>
+                                            {fieldTypeLabels[type]}
+                                          </option>
+                                        ))}
+                                      </select>
+                                      <small className="muted">
+                                        {fieldTypeOptions(f).length === 1
+                                          ? 'Fixed type for this built-in field.'
+                                          : 'When changing to Dropdown, existing values are kept as options when you save.'}
+                                      </small>
+                                    </label>
+                                  </div>
+                                  <div className="field-admin-order">
+                                    <div className="field-order">
+                                      <button
+                                        disabled={busy || i === 0}
+                                        aria-label={'Move ' + f.label + ' up'}
+                                        onClick={() => move(i, -1)}
+                                      >
+                                        <ArrowUp size={16} />
+                                      </button>
+                                      <button
+                                        disabled={
+                                          busy || i === definitions.length - 1
+                                        }
+                                        aria-label={'Move ' + f.label + ' down'}
+                                        onClick={() => move(i, 1)}
+                                      >
+                                        <ArrowDown size={16} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="field-admin-settings">
+                                  <label>
+                                    <input
+                                      type="checkbox"
+                                      aria-label={'Show ' + f.label}
+                                      checked={f.enabled}
+                                      disabled={
+                                        busy || lockedFields.includes(f.key)
+                                      }
+                                      onChange={(e) =>
+                                        change(i, { enabled: e.target.checked })
+                                      }
+                                    />
+                                    Visible
+                                  </label>
+                                  <label>
+                                    <input
+                                      type="checkbox"
+                                      aria-label={'Require ' + f.label}
+                                      checked={f.required}
+                                      disabled={
+                                        busy || lockedFields.includes(f.key)
+                                      }
+                                      onChange={(e) =>
+                                        change(i, {
+                                          required: e.target.checked,
+                                        })
+                                      }
+                                    />
+                                    Required
+                                  </label>
+                                  {lockedFields.includes(f.key) && (
+                                    <span className="muted">
+                                      Essential field — always visible and
+                                      required
+                                    </span>
+                                  )}
+                                </div>
+
+                                <details
+                                  className="field-advanced"
+                                  open={f.type === 'select'}
+                                >
+                                  <summary>Options &amp; applicability</summary>
+                                  {f.key === 'priority' && (
+                                    <p className="muted">
+                                      {f.options.map(priorityLabel).join(' · ')}
+                                    </p>
+                                  )}
+                                  {f.type === 'select' && (
+                                    <label>
+                                      Options — one per line
+                                      <textarea
+                                        aria-label={'Options for ' + f.label}
+                                        value={f.options.join('\n')}
+                                        disabled={busy}
+                                        onChange={(e) =>
+                                          change(i, {
+                                            options: e.target.value.split('\n'),
+                                          })
+                                        }
+                                      />
+                                    </label>
+                                  )}
+                                  {f.key === 'status' &&
+                                    [...new Set(f.options.filter(Boolean))].map(
+                                      (option) => (
+                                        <label
+                                          className="status-category"
+                                          key={option}
+                                        >
+                                          {option}
+                                          <select
+                                            aria-label={`Category for ${option}`}
+                                            disabled={busy}
+                                            value={
+                                              f.categories?.[option] ??
+                                              statusCategory(option)
+                                            }
+                                            onChange={(e) =>
+                                              change(i, {
+                                                categories: {
+                                                  ...f.categories,
+                                                  [option]: e.target.value as
+                                                    | 'open'
+                                                    | 'in-progress'
+                                                    | 'completed',
+                                                },
+                                              })
+                                            }
+                                          >
+                                            <option value="open">Open</option>
+                                            <option value="in-progress">
+                                              In progress
+                                            </option>
+                                            <option value="completed">
+                                              Completed
+                                            </option>
+                                          </select>
+                                        </label>
+                                      ),
+                                    )}
+                                  {!lockedFields.includes(f.key) &&
+                                    f.key !== 'issueType' && (
+                                      <fieldset
+                                        className="field-scope-choices"
+                                        disabled={busy}
+                                      >
+                                        <legend>Show for issue types</legend>
+                                        <p className="muted">
+                                          Leave all unchecked to show for every
+                                          issue type.
+                                        </p>
+                                        {(
+                                          definitions.find(
+                                            (field) =>
+                                              field.key === 'issueType',
+                                          )?.options ?? []
+                                        )
+                                          .filter(Boolean)
+                                          .map((type) => (
+                                            <label key={type}>
+                                              <input
+                                                type="checkbox"
+                                                checked={(
+                                                  f.issueTypes ?? []
+                                                ).includes(type)}
+                                                onChange={(e) =>
+                                                  change(i, {
+                                                    issueTypes: e.target.checked
+                                                      ? [
+                                                          ...(f.issueTypes ??
+                                                            []),
+                                                          type,
+                                                        ]
+                                                      : (
+                                                          f.issueTypes ?? []
+                                                        ).filter(
+                                                          (t) => t !== type,
+                                                        ),
+                                                  })
+                                                }
+                                              />
+                                              {type}
+                                            </label>
+                                          ))}
+                                      </fieldset>
+                                    )}
+                                </details>
+                              </div>
+                            </details>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  );
+                })}
+                {!definitions.some(matchesSearch) && (
+                  <output className="muted">No matching fields.</output>
+                )}
+              </div>
+              <details className="settings-new-field">
+                <summary>
+                  <Plus size={17} aria-hidden="true" /> Add custom field
+                </summary>
+                <div className="settings-new-field-content">
+                  <div className="fields">
+                    <label>
+                      Label
+                      <input
+                        value={newLabel}
+                        maxLength={80}
+                        disabled={busy}
+                        onChange={(e) => setNewLabel(e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Type
+                      <select
+                        value={newType}
+                        disabled={busy}
+                        onChange={(e) =>
+                          setNewType(e.target.value as FieldDefinition['type'])
+                        }
+                      >
+                        {['text', 'textarea', 'select', 'number', 'date'].map(
+                          (t) => (
+                            <option key={t}>{t}</option>
+                          ),
+                        )}
+                      </select>
+                    </label>
+                    {newType === 'select' && (
+                      <label>
+                        Options (comma separated)
+                        <input
+                          value={newOptions}
+                          disabled={busy}
+                          onChange={(e) => setNewOptions(e.target.value)}
+                        />
+                      </label>
+                    )}
+                  </div>
+                  <div className="actions">
+                    <button disabled={busy} onClick={addField}>
+                      <Plus size={16} /> Add field
+                    </button>
+                  </div>
+                  <p className="muted">
+                    Then choose Save fields to apply your changes.
+                  </p>
+                </div>
+              </details>
+            </section>
+            <section
+              className="settings-form-preview"
+              aria-labelledby="settings-preview-title"
+            >
+              <div className="settings-preview-heading">
+                <h2 id="settings-preview-title">Form preview</h2>
+                <span className="settings-preview-badge">
+                  {fieldDirty ? 'Unsaved draft' : 'Current settings'}
+                </span>
+              </div>
+              <p className="muted">
+                See how your settings shape a report. Preview fields cannot
+                submit an issue.
+              </p>
+              <div
+                className="settings-preview-modes"
+                aria-label="Preview form mode"
+              >
+                <button
+                  aria-pressed={previewMode === 'quick'}
+                  onClick={() => setPreviewMode('quick')}
+                >
+                  Quick report
+                </button>
+                <button
+                  aria-pressed={previewMode === 'full'}
+                  onClick={() => setPreviewMode('full')}
+                >
+                  Full report
+                </button>
+              </div>
+              {previewMode === 'full' && (
+                <label className="settings-preview-type">
+                  Preview issue type
+                  <select
+                    value={effectivePreviewType}
+                    onChange={(event) => setPreviewType(event.target.value)}
+                  >
+                    {(issueTypes.length ? issueTypes : ['Bug']).map((type) => (
+                      <option key={type}>{type}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <output className="settings-preview-count muted">
+                {previewMode === 'quick'
+                  ? 'Only project and title need your input to get started.'
+                  : `${fullPreviewFields.length} visible fields · ${fullPreviewFields.filter((field) => field.required).length} required`}
+              </output>
+              <fieldset disabled className="settings-preview-fields">
+                <legend className="sr-only">Report form preview</legend>
+                {previewFields.map((field) => {
+                  const required =
+                    previewMode === 'quick'
+                      ? ['title', 'project'].includes(field.key)
+                      : field.required;
+                  const label =
+                    previewMode === 'quick' && field.key === 'description'
+                      ? 'What went wrong?'
+                      : fieldLabel(field, effectivePreviewType);
+                  return (
+                    <label key={field.key}>
+                      <span>
+                        {label}
+                        {required && <span aria-label="required"> *</span>}
+                      </span>
+                      {field.key === 'project' ? (
+                        <select
+                          value={projects[0]?.name ?? ''}
+                          aria-label={`${label} preview`}
+                        >
+                          {projects.length ? (
+                            projects.map((project) => (
+                              <option key={project.id}>{project.name}</option>
+                            ))
+                          ) : (
+                            <option>Choose a project</option>
+                          )}
+                        </select>
+                      ) : field.type === 'textarea' ? (
+                        <textarea
+                          rows={3}
+                          placeholder={
+                            field.key === 'description'
+                              ? 'A short description of the problem…'
+                              : `Add ${label.toLowerCase()}…`
+                          }
+                          aria-label={`${label} preview`}
+                        />
+                      ) : field.type === 'select' ? (
+                        <select
+                          value={
+                            field.key === 'issueType'
+                              ? effectivePreviewType
+                              : ''
+                          }
+                          aria-label={`${label} preview`}
+                        >
+                          <option value="">
+                            Choose {label.toLowerCase()}…
+                          </option>
+                          {field.options
+                            .filter(Boolean)
+                            .map((option, index) => (
+                              <option key={`${option}-${index}`} value={option}>
+                                {field.key === 'priority'
+                                  ? priorityLabel(option)
+                                  : option}
+                              </option>
+                            ))}
+                        </select>
+                      ) : (
+                        <input
+                          type={
+                            field.type === 'number' || field.type === 'date'
+                              ? field.type
+                              : 'text'
+                          }
+                          placeholder={
+                            field.key === 'title'
+                              ? 'Login closes when I tap Continue'
+                              : `Add ${label.toLowerCase()}…`
+                          }
+                          aria-label={`${label} preview`}
+                        />
+                      )}
+                    </label>
+                  );
+                })}
+                <div className="settings-preview-evidence">
+                  <Paperclip size={19} aria-hidden="true" />
+                  <strong>Screenshots &amp; files</strong>
+                  <span>Optional evidence</span>
+                </div>
+              </fieldset>
+              {previewMode === 'quick' && (
+                <p className="settings-preview-details muted">
+                  Additional details are available when you need them.
+                </p>
+              )}
+            </section>
+          </div>
+        </div>
       )}
     </>
   );

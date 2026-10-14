@@ -7,12 +7,14 @@ export function ComponentPicker({
   value,
   onChange,
   options,
+  kind = 'component',
 }: {
   label: string;
   required: boolean;
   value: string;
   onChange: (value: string) => void;
   options: string[];
+  kind?: 'component' | 'version';
 }) {
   const id = useId();
   const existing = options.find(
@@ -38,25 +40,31 @@ export function ComponentPicker({
         }}
       >
         <option value="" disabled={required}>
-          {required ? 'Select a component…' : 'No component'}
+          {required ? `Select a ${kind}…` : `No ${kind}`}
         </option>
         {options.map((name) => (
           <option key={name} value={'component:' + name}>
             {name}
           </option>
         ))}
-        <option value="new">+ Create a new component…</option>
+        <option value="new">+ Create a new {kind}…</option>
       </select>
       {showInput && (
         <>
-          <label htmlFor={id + '-name'}>Component name</label>
+          <label htmlFor={id + '-name'}>
+            {kind === 'version' ? 'Version' : 'Component name'}
+          </label>
           <input
             id={id + '-name'}
             value={value}
             required={required}
             maxLength={500}
             autoComplete="off"
-            placeholder="Enter a component name"
+            placeholder={
+              kind === 'version'
+                ? 'Enter a version, e.g. 1.2.0'
+                : 'Enter a component name'
+            }
             aria-describedby={id + '-hint'}
             onChange={(e) => onChange(e.target.value)}
           />
@@ -64,12 +72,12 @@ export function ComponentPicker({
       )}
       <p className="muted" id={id + '-hint'}>
         {value.trim() && !existing
-          ? 'This component will be created for this project when you save the issue.'
+          ? `This ${kind} will be saved for this project when you save the issue.`
           : existing
-            ? 'This saved component will be used.'
+            ? `This saved ${kind} will be used.`
             : options.length
-              ? 'Select a saved component or choose “Create a new component”.'
-              : 'No components saved for this project yet. Choose “Create a new component” to add one.'}
+              ? `Select a saved ${kind} or choose “Create a new ${kind}”.`
+              : `No ${kind}s saved for this project yet. Choose “Create a new ${kind}” to add one.`}
       </p>
     </div>
   );

@@ -1,6 +1,13 @@
+import { validateFieldConfig, validateImage, projectData, upgradeFields } from '../lib/workspace-validation.mjs';
+export { validateFieldConfig, validateImage } from '../lib/workspace-validation.mjs';
+import {
+  compressAttachment,
+  compressBytes,
+} from './attachment-compression.mjs';
 import { randomUUID } from 'node:crypto';
 import { mediaInfo, readMediaHeader, sendMedia } from './media.mjs';
 import {
+  renameSync,
   mkdirSync,
   createWriteStream,
   createReadStream,
@@ -13,6 +20,7 @@ import { pipeline } from 'node:stream/promises';
 import {
   defaultFields,
   lockedFields,
+  fieldTypeOptions,
   fieldApplies,
   statusCategory,
 } from '../lib/field-schema.mjs';
@@ -21,130 +29,36 @@ const str = (v, max = 500) => {
     throw Error('Invalid text value.');
   return v.trim();
 };
-export function validateFieldConfig(value) {
-  if (!Array.isArray(value) || value.length > 60)
-    throw Error('Use up to 60 fields.');
-  value = upgradeFields(value);
-  const keys = new Set();
-  const clean = value.map((f) => {
-    if (!f || typeof f.key !== 'string' || keys.has(f.key))
-      throw Error('Invalid or duplicate field key.');
-    keys.add(f.key);
-    const base = defaultFields.find((b) => b.key === f.key);
-    if (!base && !/^custom_[a-zA-Z0-9_-]{1,80}$/.test(f.key))
-      throw Error('Invalid custom field key.');
-    if (
-      !['text', 'textarea', 'number', 'date', 'select'].includes(f.type) ||
-      typeof f.enabled !== 'boolean' ||
-      typeof f.required !== 'boolean'
-    )
-      throw Error('Invalid field settings.');
-    const label = str(f.label, 80);
-    if (!label) throw Error('Field label is required.');
-    if (!Array.isArray(f.options) || f.options.length > 100)
-      throw Error('Invalid options.');
-    const options = [
-      ...new Set(
-        f.options
-          .map((o) => str(o, f.key === 'environment' ? 500 : 200))
-          .filter(Boolean),
-      ),
-    ];
-    if (
-      f.type === 'select' &&
-      !options.length &&
-      (f.key !== 'environment' || f.required)
-    )
-      throw Error('Select fields need options.');
-    if (base && base.type !== f.type)
-      throw Error('Built-in field types cannot change.');
-    if (lockedFields.includes(f.key) && (!f.enabled || !f.required))
-      throw Error(
-        'Title, project, status and priority must stay enabled and required.',
-      );
-    const issueTypes = f.issueTypes ?? base?.issueTypes ?? [];
-    if (
-      !Array.isArray(issueTypes) ||
-      issueTypes.some((type) => typeof type !== 'string' || type.length > 200)
-    )
-      throw Error('Invalid issue type scope.');
-    const categories = {};
-    if (f.key === 'status')
-      for (const option of options) {
-        const category = f.categories?.[option] ?? statusCategory(option);
-        if (!['open', 'in-progress', 'completed'].includes(category))
-          throw Error('Invalid status category.');
-        categories[option] = category;
-      }
-    return {
-      key: f.key,
-      label,
-      type: f.type,
-      enabled: f.enabled,
-      required: f.required,
-      options,
-      builtin: !!base,
-      issueTypes:
-        lockedFields.includes(f.key) || f.key === 'issueType' ? [] : issueTypes,
-      ...(f.key === 'status' ? { categories } : {}),
-    };
-  });
-  if (defaultFields.some((f) => !keys.has(f.key)))
-    throw Error('Hide built-in fields instead of removing them.');
-  return clean;
-}
-function upgradeFields(fields) {
-  return [
-    ...fields.map((f) => ({
-      ...f,
-      ...(f.key === 'environment'
-        ? {
-            type: 'select',
-            label:
-              f.label === 'Environment / browser / device'
-                ? 'Environment'
-                : f.label,
-          }
-        : {}),
-      issueTypes:
-        f.issueTypes ??
-        defaultFields.find((b) => b.key === f.key)?.issueTypes ??
-        [],
-    })),
-    ...defaultFields.filter((base) => !fields.some((f) => f?.key === base.key)),
-  ];
-}
-export function validateImage(image) {
-  if (!image) return '';
-  if (typeof image !== 'string' || image.length > 2_800_000)
-    throw Error('Project image must be at most 2 MB.');
-  const m = image.match(
-    /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]*={0,2})$/,
+// Only an unambiguous, still-visible legacy text field is consolidated. Keeping
+// its saved values preserves conflicts, and hiding it marks the migration done:
+// a later intentional clearing of fixVersion must not refill it on restart.
+function consolidateFixVersion(fields, bugs) {
+  const candidates = fields.filter(
+    (f) =>
+      f.key?.startsWith('custom_') && /^fix\s+version$/i.test(f.label?.trim()),
   );
-  if (!m) throw Error('Use a PNG, JPEG or WebP image.');
-  const b = Buffer.from(m[2], 'base64');
+  const builtin = fields.find((f) => f.key === 'fixVersion');
+  const legacy = candidates.length === 1 ? candidates[0] : null;
   if (
-    b.length > 2_000_000 ||
-    !(
-      (m[1] === 'png' &&
-        b.subarray(0, 8).toString('hex') === '89504e470d0a1a0a') ||
-      (m[1] === 'jpeg' && b[0] === 255 && b[1] === 216 && b[2] === 255) ||
-      (m[1] === 'webp' &&
-        b.subarray(0, 4).toString() === 'RIFF' &&
-        b.subarray(8, 12).toString() === 'WEBP')
-    )
+    !legacy?.enabled ||
+    legacy.type !== 'text' ||
+    !builtin?.enabled ||
+    !/^fix\s+version$/i.test(builtin.label?.trim())
   )
-    throw Error('Invalid image file.');
-  return image;
-}
-function projectData(p) {
-  const name = str(p.name);
-  if (!name) throw Error('Project name is required.');
+    return { fields, bugs };
   return {
-    name,
-    description: str(p.description ?? '', 10000),
-    icon: str(p.icon ?? '', 16),
-    image: validateImage(p.image ?? ''),
+    fields: fields.map((f) =>
+      f.key === legacy.key ? { ...f, enabled: false, required: false } : f,
+    ),
+    bugs: bugs.map((bug) => {
+      const value = bug.customFields?.[legacy.key];
+      return !bug.fixVersion?.trim() &&
+        typeof value === 'string' &&
+        value.trim() &&
+        value.trim().length <= 500
+        ? { ...bug, fixVersion: value.trim() }
+        : bug;
+    }),
   };
 }
 function fileData(a, limit = 10_000_000) {
@@ -168,6 +82,7 @@ function fileData(a, limit = 10_000_000) {
 export function workspace(db, { list, get, save }, directory) {
   db.exec(`CREATE TABLE IF NOT EXISTS projects(id INTEGER PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, description TEXT NOT NULL DEFAULT '',icon TEXT NOT NULL DEFAULT '',image TEXT NOT NULL DEFAULT '');
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS project_versions(project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,name TEXT NOT NULL COLLATE NOCASE,PRIMARY KEY(project_id,name));
     CREATE TABLE IF NOT EXISTS project_components(project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,name TEXT NOT NULL COLLATE NOCASE,PRIMARY KEY(project_id,name));
     CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY,bug_id INTEGER NOT NULL REFERENCES bugs(id) ON DELETE CASCADE,name TEXT NOT NULL,bytes BLOB NOT NULL,created_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS idx_attachments_bug ON attachments(bug_id);`);
@@ -194,6 +109,13 @@ export function workspace(db, { list, get, save }, directory) {
       )
       .all(id)
       .map((f) => f.id);
+  const attachmentActivity = (id, text) => {
+    const bug = get(id);
+    if (!bug) throw Error('Issue is no longer available.');
+    bug.updatedAt = new Date().toISOString();
+    bug.history.push({ at: bug.updatedAt, text });
+    save(bug);
+  };
   async function upload(req, res, id, send) {
     if (!get(id)) return send(404, { error: 'Bug not found.' });
     if (files(id).length >= 20)
@@ -201,7 +123,7 @@ export function workspace(db, { list, get, save }, directory) {
     const limit = 250_000_000;
     if (Number(req.headers['content-length']) > limit)
       return send(413, { error: 'Each attachment must be at most 250 MB.' });
-    const name = str(
+    let name = str(
       decodeURIComponent(String(req.headers['x-file-name'] ?? '')),
       255,
     ).replace(/[\x00-\x1f\x7f/\\]/g, '_');
@@ -225,11 +147,19 @@ export function workspace(db, { list, get, save }, directory) {
         limiter,
         createWriteStream(join(fileRoot, key), { flags: 'wx' }),
       );
+      const optimized = await compressAttachment(join(fileRoot, key), name);
+      if (optimized) {
+        renameSync(optimized.path, join(fileRoot, key));
+        name = optimized.name;
+        size = optimized.size;
+      }
+      if (!get(id)) throw Error('Issue is no longer available.');
       if (files(id).length >= 20)
         throw Error('An issue can have up to 20 attachments.');
       db.prepare(
         'INSERT INTO attachments(id,bug_id,name,bytes,created_at,storage_size) VALUES (?,?,?,?,?,?)',
       ).run(key, id, name, Buffer.alloc(0), new Date().toISOString(), size);
+      attachmentActivity(id, `Added attachment: ${name}`);
       send(
         201,
         files(id).find((f) => f.id === key),
@@ -258,9 +188,25 @@ export function workspace(db, { list, get, save }, directory) {
       )
       .get(id, name).name;
   };
+  const ensureVersion = (project, value) => {
+    const name = str(value ?? '');
+    if (!name) return '';
+    const id = db
+      .prepare('SELECT id FROM projects WHERE name=?')
+      .get(project).id;
+    db.prepare(
+      'INSERT OR IGNORE INTO project_versions(project_id,name) VALUES (?,?)',
+    ).run(id, name);
+    return db
+      .prepare(
+        'SELECT name FROM project_versions WHERE project_id=? AND name=?',
+      )
+      .get(id, name).name;
+  };
   for (const bug of list()) {
     ensureProject(bug.project);
     ensureComponent(bug.project, bug.component);
+    ensureVersion(bug.project, bug.version);
   }
   const projects = () =>
     db
@@ -268,6 +214,12 @@ export function workspace(db, { list, get, save }, directory) {
       .all()
       .map((p) => ({
         ...p,
+        versions: db
+          .prepare(
+            'SELECT name FROM project_versions WHERE project_id=? ORDER BY name COLLATE NOCASE',
+          )
+          .all(p.id)
+          .map((v) => v.name),
         components: db
           .prepare(
             'SELECT name FROM project_components WHERE project_id=? ORDER BY name COLLATE NOCASE',
@@ -289,7 +241,9 @@ export function workspace(db, { list, get, save }, directory) {
       )
       .run(JSON.stringify(fields));
   // Seed the new dropdown with existing reports so no saved environment is lost.
-  const upgradedConfig = config();
+  const existingBugs = list();
+  const upgraded = consolidateFixVersion(config(), existingBugs);
+  const upgradedConfig = upgraded.fields;
   const environment = upgradedConfig.find((f) => f.key === 'environment');
   environment.options = [
     ...new Set([
@@ -299,7 +253,17 @@ export function workspace(db, { list, get, save }, directory) {
         .filter(Boolean),
     ]),
   ];
-  setConfig(upgradedConfig);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    setConfig(upgradedConfig);
+    upgraded.bugs.forEach((bug, index) => {
+      if (bug !== existingBugs[index]) save(bug);
+    });
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
   const files = (id) =>
     db
       .prepare(
@@ -326,27 +290,39 @@ export function workspace(db, { list, get, save }, directory) {
     ).run(key, id, f.name, f.bytes, new Date().toISOString());
     return key;
   };
-  const exportBug = (b) => ({
-    ...b,
-    attachments: db
-      .prepare(
-        'SELECT id,name,bytes,storage_size FROM attachments WHERE bug_id=?',
-      )
-      .all(b.id)
-      .map((f) => ({
-        name: f.name,
-        base64: (f.storage_size === null
-          ? Buffer.from(f.bytes)
-          : readFileSync(join(fileRoot, f.id))
-        ).toString('base64'),
-      })),
-  });
+  const exportBug = (b) => {
+    const report = { ...b };
+    // An imported backup creates copies; creation tokens belong only to the
+    // original live issue and must never be reused by restored copies.
+    delete report.creationToken;
+    delete report.creationAccountId;
+    return {
+      ...report,
+      attachments: db
+        .prepare(
+          'SELECT id,name,bytes,storage_size FROM attachments WHERE bug_id=?',
+        )
+        .all(b.id)
+        .map((f) => ({
+          name: f.name,
+          base64: (f.storage_size === null
+            ? Buffer.from(f.bytes)
+            : readFileSync(join(fileRoot, f.id))
+          ).toString('base64'),
+        })),
+    };
+  };
   function validateValues(data) {
     for (const f of config().filter((f) => fieldApplies(f, data.issueType))) {
       const value = f.builtin
         ? data[f.key]
         : (data.customFields?.[f.key] ?? '');
-      if (f.required && !value?.trim()) throw Error(`${f.label} is required.`);
+      if (
+        f.required &&
+        (!data.quickReport || lockedFields.includes(f.key)) &&
+        !value?.trim()
+      )
+        throw Error(`${f.label} is required.`);
       if (value && f.type === 'select' && !f.options.includes(value))
         throw Error(`Choose a valid ${f.label}.`);
       if (value && f.type === 'number' && !Number.isFinite(Number(value)))
@@ -369,14 +345,21 @@ export function workspace(db, { list, get, save }, directory) {
         (p.components ?? []).length > 10000
       )
         throw Error('Invalid components.');
+      if (!Array.isArray(p.versions ?? []) || (p.versions ?? []).length > 10000)
+        throw Error('Invalid versions.');
       return {
         ...projectData(p),
+        versions: (p.versions ?? []).map((name) => str(name)).filter(Boolean),
         components: (p.components ?? [])
           .map((name) => str(name))
           .filter(Boolean),
       };
     });
-    const fs = body.fields ? validateFieldConfig(body.fields) : config();
+    const migrated = consolidateFixVersion(
+      body.fields ? validateFieldConfig(body.fields) : config(),
+      body.bugs,
+    );
+    const fs = migrated.fields;
     const importedEnvironment = fs.find((f) => f.key === 'environment');
     importedEnvironment.options = [
       ...new Set([
@@ -400,45 +383,53 @@ export function workspace(db, { list, get, save }, directory) {
             'A custom field conflicts with this workspace. Import into an empty workspace.',
           );
       }
-    return () => {
-      for (const p of ps) {
-        db.prepare(
-          'INSERT OR IGNORE INTO projects(name,description,icon,image) VALUES (?,?,?,?)',
-        ).run(p.name, p.description, p.icon, p.image);
-        for (const name of p.components) ensureComponent(p.name, name);
-      }
-      if (fs)
-        setConfig(
-          list().length === 0
-            ? fs
-            : [
-                ...config().map((current) => {
-                  const incoming = fs.find((f) => f.key === current.key);
-                  return current.builtin &&
-                    current.type === 'select' &&
-                    incoming
-                    ? {
-                        ...current,
-                        options: [
-                          ...new Set([...current.options, ...incoming.options]),
-                        ],
-                        ...(current.key === 'status'
-                          ? {
-                              categories: {
-                                ...incoming.categories,
-                                ...current.categories,
-                              },
-                            }
-                          : {}),
-                      }
-                    : current;
-                }),
-                ...fs.filter((f) => !config().some((c) => c.key === f.key)),
-              ],
-        );
+    return {
+      bugs: migrated.bugs,
+      fields: fs,
+      apply: () => {
+        for (const p of ps) {
+          db.prepare(
+            'INSERT OR IGNORE INTO projects(name,description,icon,image) VALUES (?,?,?,?)',
+          ).run(p.name, p.description, p.icon, p.image);
+          for (const name of p.components) ensureComponent(p.name, name);
+          for (const name of p.versions) ensureVersion(p.name, name);
+        }
+        if (fs)
+          setConfig(
+            list().length === 0
+              ? fs
+              : [
+                  ...config().map((current) => {
+                    const incoming = fs.find((f) => f.key === current.key);
+                    return current.builtin &&
+                      current.type === 'select' &&
+                      incoming
+                      ? {
+                          ...current,
+                          options: [
+                            ...new Set([
+                              ...current.options,
+                              ...incoming.options,
+                            ]),
+                          ],
+                          ...(current.key === 'status'
+                            ? {
+                                categories: {
+                                  ...incoming.categories,
+                                  ...current.categories,
+                                },
+                              }
+                            : {}),
+                        }
+                      : current;
+                  }),
+                  ...fs.filter((f) => !config().some((c) => c.key === f.key)),
+                ],
+          );
+      },
     };
   }
-  function handle(req, res, url, body, send) {
+  async function handle(req, res, url, body, send) {
     const path = url.pathname,
       method = req.method;
     if (path === '/api/projects' && method === 'GET') {
@@ -450,8 +441,27 @@ export function workspace(db, { list, get, save }, directory) {
       return true;
     }
     if (path === '/api/fields' && method === 'PUT') {
-      const clean = validateFieldConfig(body);
       const old = config();
+      // Converting to a dropdown retains every saved value as an option.
+      const input = Array.isArray(body)
+        ? body.map((f) => {
+            const previous = old.find((p) => p.key === f?.key);
+            if (
+              !previous ||
+              previous.type === 'select' ||
+              f.type !== 'select' ||
+              !Array.isArray(f.options)
+            )
+              return f;
+            const used = list()
+              .map((b) =>
+                previous.builtin ? b[f.key] : b.customFields?.[f.key],
+              )
+              .filter(Boolean);
+            return { ...f, options: [...new Set([...f.options, ...used])] };
+          })
+        : body;
+      const clean = validateFieldConfig(input);
       for (const field of clean.filter((f) => f.type === 'select')) {
         const used = list()
           .map((b) =>
@@ -468,12 +478,27 @@ export function workspace(db, { list, get, save }, directory) {
         throw Error(
           'Hide fields instead of removing them, so saved values are preserved.',
         );
-      for (const f of old.filter((f) => !f.builtin)) {
-        const next = clean.find((c) => c.key === f.key);
-        if (next.type !== f.type)
-          throw Error(
-            'Existing field types cannot change. Add a new field instead.',
-          );
+      for (const field of clean.filter(
+        (f) => old.find((o) => o.key === f.key)?.type !== f.type,
+      )) {
+        for (const bug of list()) {
+          const value = field.builtin
+            ? bug[field.key]
+            : bug.customFields?.[field.key];
+          if (!value) continue;
+          if (field.type === 'number' && !Number.isFinite(Number(value)))
+            throw Error(
+              `${field.label}: existing value "${value}" is not a number. Update it before changing the type.`,
+            );
+          if (
+            field.type === 'date' &&
+            (!/^\d{4}-\d{2}-\d{2}$/.test(value) ||
+              Number.isNaN(Date.parse(value)))
+          )
+            throw Error(
+              `${field.label}: existing value "${value}" is not a date. Update it before changing the type.`,
+            );
+        }
       }
       setConfig(clean);
       send(200, clean);
@@ -551,7 +576,17 @@ export function workspace(db, { list, get, save }, directory) {
         return true;
       }
       if (method === 'POST' && !am[2]) {
-        const key = addFile(id, body);
+        const input = fileData(body);
+        const optimized = await compressBytes(input.bytes, input.name);
+        if (!get(id)) throw Error('Issue is no longer available.');
+        const key = addFile(id, {
+          name: optimized.name,
+          base64: optimized.bytes.toString('base64'),
+        });
+        attachmentActivity(
+          id,
+          `Added attachment: ${files(id).find((f) => f.id === key).name}`,
+        );
         send(
           201,
           files(id).find((f) => f.id === key),
@@ -580,6 +615,7 @@ export function workspace(db, { list, get, save }, directory) {
         return true;
       }
       if (method === 'DELETE') {
+        attachmentActivity(id, `Deleted attachment: ${a.name}`);
         db.prepare('DELETE FROM attachments WHERE id=?').run(a.id);
         if (a.storage_size !== null) removeDiskFile(a.id);
         send(200, { deleted: true });
@@ -612,6 +648,7 @@ export function workspace(db, { list, get, save }, directory) {
     config,
     ensureProject,
     ensureComponent,
+    ensureVersion,
     exportBug,
     addFile,
     prepareImport,

@@ -1,4 +1,6 @@
 'use client';
+import { ProjectExport } from './project-export';
+import { useAccess } from './account-gate';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { statusCategory, type FieldDefinition } from '../lib/field-schema.mjs';
@@ -23,6 +25,10 @@ const types = [
   { name: 'Task', label: 'Tasks', Icon: ListTodo },
   { name: 'Feature request', label: 'Features', Icon: Sparkles },
 ];
+function OwnerProjectLink(props: React.ComponentProps<typeof Link>) {
+  const { owner } = useAccess();
+  return owner ? <Link {...props} /> : null;
+}
 
 export function ProjectsOverview({
   projects,
@@ -98,12 +104,12 @@ export function ProjectsOverview({
         </div>
         {selected && (
           <div className="actions">
-            <Link
+            <OwnerProjectLink
               className="button"
               href={'/?view=admin&editProject=' + selected.id}
             >
               <Pencil size={16} /> Edit project
-            </Link>
+            </OwnerProjectLink>
             <button className="primary" onClick={() => onNew(selected.name)}>
               New issue
             </button>
@@ -112,6 +118,11 @@ export function ProjectsOverview({
       </header>
       {selected ? (
         <>
+          <ProjectExport
+            key={selected.id}
+            project={selected}
+            types={typeNames}
+          />
           <div className="project-type-filters" aria-label="Issue types">
             <button aria-pressed={!type} onClick={() => setType('')}>
               All issues <strong>{current.length}</strong>
@@ -144,7 +155,11 @@ export function ProjectsOverview({
                 <div className="project-issue-row" key={issue.id}>
                   <Link href={`/bugs/${issue.id}?fromProject=${selected.id}`}>
                     <span>
-                      <IssueIdentity id={issue.id} type={issue.issueType} />
+                      <IssueIdentity
+                        id={issue.id}
+                        type={issue.issueType}
+                        issueKey={issue.issueKey}
+                      />
                       <strong>{issue.title}</strong>
                     </span>
                   </Link>

@@ -17,3 +17,6 @@ export function statusCategory(
 ): 'open' | 'in-progress' | 'completed';
 export const defaultFields: FieldDefinition[];
 export const lockedFields: string[];
+export function fieldTypeOptions(
+  field: FieldDefinition,
+): FieldDefinition['type'][];

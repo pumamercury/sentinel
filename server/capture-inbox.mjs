@@ -1,3 +1,7 @@
+import {
+  compressAttachment,
+  compressBytes,
+} from './attachment-compression.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   createReadStream,
@@ -15,7 +19,6 @@ import {
   isAbsolute,
   join,
   relative,
-  resolve,
   sep,
 } from 'node:path';
 import { homedir } from 'node:os';
@@ -24,6 +27,7 @@ import { promisify } from 'node:util';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { readMediaHeader, mediaInfo, sendMedia } from './media.mjs';
+import { photosSource } from './photos-source.mjs';
 
 const execFileAsync = promisify(execFile);
 const MAX_SIZE = 250_000_000;
@@ -103,6 +107,7 @@ export async function localAvailability(folder) {
 export function captureInbox(db, { get, save }, directory, options = {}) {
   const fileRoot = join(directory, 'attachments');
   mkdirSync(fileRoot, { recursive: true });
+  const photos = photosSource(directory, options.photos);
   db.exec(`CREATE TABLE IF NOT EXISTS capture_inbox (
     id TEXT PRIMARY KEY,name TEXT NOT NULL,bytes BLOB,storage_size INTEGER,created_at TEXT NOT NULL,
     source_path TEXT NOT NULL,source_modified TEXT NOT NULL,hash TEXT NOT NULL UNIQUE);
@@ -201,11 +206,12 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
     )
       throw Error('Enter the full path to a local captures folder.');
     const folder = await realpath(value.trim());
+    const dataFolder = await realpath(directory);
     if (!(await lstat(folder)).isDirectory()) throw Error('Choose a folder.');
     if (
       dirname(folder) === folder ||
-      within(folder, resolve(directory)) ||
-      within(resolve(directory), folder)
+      within(folder, dataFolder) ||
+      within(dataFolder, folder)
     )
       throw Error(
         'Choose a dedicated captures folder outside Sentinel’s data folder.',
@@ -315,7 +321,7 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
       const digest = hash.digest('hex');
       if (db.prepare('SELECT 1 FROM capture_hashes WHERE hash=?').get(digest)) {
         putSeen(config.folder, rel, signature, 'duplicate');
-        return;
+        return true;
       }
       if (stopped) return;
       renameSync(join(fileRoot, part), join(fileRoot, id));
@@ -325,16 +331,17 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
           'INSERT INTO capture_inbox(id,name,storage_size,created_at,source_path,source_modified,hash) VALUES(?,?,?,?,?,?,?)',
         ).run(
           id,
-          safeName(basename(file)),
+          safeName(config.name ?? basename(file)),
           size,
           new Date().toISOString(),
-          file,
-          new Date(stat.mtimeMs).toISOString(),
+          config.sourcePath ?? file,
+          config.sourceModified ?? new Date(stat.mtimeMs).toISOString(),
           digest,
         );
         db.prepare('INSERT INTO capture_hashes(hash) VALUES(?)').run(digest);
         putSeen(config.folder, rel, signature, 'imported');
         db.exec('COMMIT');
+        return true;
       } catch (e) {
         db.exec('ROLLBACK');
         removeFile(id);
@@ -348,10 +355,12 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
   }
   async function scan() {
     const config = settings();
-    if (stopped || configuring || !config.enabled || !config.folder) return;
+    if (stopped || configuring) return;
     controller = new AbortController();
     scanError = '';
     try {
+      await photos.drain(importFile);
+      if (!config.enabled || !config.folder) return;
       scanStage = 'Listing capture files';
       const found = await enumerate(config.folder);
       scanStage = 'Checking iCloud download status';
@@ -446,7 +455,9 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
           e.code === 'ENOENT'
             ? 'Watched folder is unavailable. Check iCloud and the folder path.'
             : e.message;
-    } finally { scanStage = ''; }
+    } finally {
+      scanStage = '';
+    }
   }
   function scanNow() {
     if (job) return job;
@@ -480,6 +491,7 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
       .all(config.folder);
     return {
       settings: config,
+      photos: photos.status(),
       scanStage,
       lastScan,
       error: scanError,
@@ -512,7 +524,7 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
         }),
     };
   }
-  function assign(ids, issueId) {
+  async function assign(ids, issueId) {
     if (
       !Array.isArray(ids) ||
       !ids.length ||
@@ -522,8 +534,42 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
     )
       throw Error('Select between 1 and 20 captures.');
     if (!Number.isSafeInteger(issueId)) throw Error('Select an issue.');
-    db.exec('BEGIN IMMEDIATE');
+    const prepared = new Map();
     try {
+      for (const id of ids) {
+        const capture = db
+          .prepare('SELECT * FROM capture_inbox WHERE id=?')
+          .get(id);
+        if (!capture)
+          throw Error('A selected capture is no longer in the inbox.');
+        if (capture.storage_size !== null) {
+          const result = await compressAttachment(
+            join(fileRoot, id),
+            capture.name,
+          );
+          if (result) {
+            prepared.set(id, result);
+            const destination = join(fileRoot, randomUUID());
+            renameSync(result.path, destination);
+            result.path = destination;
+          }
+        } else {
+          const result = await compressBytes(
+            Buffer.from(capture.bytes),
+            capture.name,
+          );
+          prepared.set(id, result);
+        }
+      }
+    } catch (error) {
+      for (const result of prepared.values())
+        if (result.path) unlinkSync(result.path);
+      throw error;
+    }
+    let transaction = false;
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      transaction = true;
       const issue = get(issueId);
       if (!issue) throw Error('Issue no longer exists.');
       const count = db
@@ -543,12 +589,12 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
         db.prepare(
           'INSERT INTO attachments(id,bug_id,name,bytes,created_at,storage_size) VALUES(?,?,?,?,?,?)',
         ).run(
-          a.id,
+          prepared.get(a.id)?.path ? basename(prepared.get(a.id).path) : a.id,
           issueId,
-          a.name,
-          a.bytes ?? Buffer.alloc(0),
+          prepared.get(a.id)?.name ?? a.name,
+          prepared.get(a.id)?.bytes ?? a.bytes ?? Buffer.alloc(0),
           a.created_at,
-          a.storage_size,
+          prepared.get(a.id)?.size ?? a.storage_size,
         );
         db.prepare('DELETE FROM capture_inbox WHERE id=?').run(a.id);
       }
@@ -559,13 +605,35 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
       });
       save(issue);
       db.exec('COMMIT');
+      transaction = false;
+      for (const a of captures)
+        if (prepared.get(a.id)?.path) {
+          try {
+            removeFile(a.id);
+          } catch {
+            /* Keep an orphan rather than undo a committed attachment. */
+          }
+        }
+      prepared.clear();
       return { assigned: ids.length };
     } catch (e) {
-      db.exec('ROLLBACK');
+      if (transaction) db.exec('ROLLBACK');
       throw e;
+    } finally {
+      for (const result of prepared.values())
+        if (result.path) {
+          try {
+            unlinkSync(result.path);
+          } catch {}
+        }
     }
   }
   async function handle(req, res, url, body, send) {
+    if (url.pathname === '/api/inbox/photos' && req.method === 'PUT') {
+      await photos.configure(body);
+      send(200, status());
+      return true;
+    }
     if (url.pathname === '/api/inbox' && req.method === 'GET') {
       send(200, status());
       return true;
@@ -580,7 +648,7 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
       return true;
     }
     if (url.pathname === '/api/inbox/assign' && req.method === 'POST') {
-      send(200, assign(body.ids, body.issueId));
+      send(200, await assign(body.ids, body.issueId));
       return true;
     }
     const match = url.pathname.match(/^\/api\/inbox\/([a-f0-9-]{36})$/);
@@ -696,6 +764,7 @@ export function captureInbox(db, { get, save }, directory, options = {}) {
   }
   function close() {
     stopped = true;
+    photos.close();
     clearInterval(timer);
     controller?.abort();
     if (configuring)

@@ -1,8 +1,13 @@
 'use client';
+import { AccountPicker } from '../components/account-picker';
+import { IssueTrash } from '../components/issue-trash';
+import { PeopleSettings } from '../components/people-settings';
 import { priorityLabel } from '../lib/priority';
+import { useAccess } from '../components/account-gate';
+import { createPortal } from 'react-dom';
 
 import { IssueIdentity, issueLabel } from '../components/issue-identity';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Bug,
   Plus,
@@ -16,6 +21,8 @@ import {
   Settings,
   AppWindow,
   Inbox,
+  Trash2,
+  UserRound,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -36,7 +43,15 @@ import {
 import { uploadAttachment, type Project } from '../lib/bugs';
 import { BugDetails } from '../components/bug-details';
 import { blank, api, badge, date, type Report, type Issue } from '../lib/bugs';
+import {
+  readDraft,
+  writeDraft,
+  readReportContext,
+  rememberReportContext,
+  type ReportDraft,
+} from '../lib/report-drafts';
 export default function Home({ bugId }: { bugId?: string }) {
+  const { owner, enabled: accountsEnabled, user, searchSlot } = useAccess();
   const router = useRouter();
   const searchParams = useSearchParams();
   const [pageSize, setPageSize] = useState(25);
@@ -83,26 +98,51 @@ export default function Home({ bugId }: { bugId?: string }) {
     if (next === 'admin' && searchParams.get('editProject'))
       setAdminSection('projects');
     setView(
-      next && ['board', 'projects', 'admin', 'inbox'].includes(next)
+      next &&
+        ['board', 'projects', 'admin', 'inbox', 'mine', 'trash'].includes(next)
         ? next
         : 'list',
     );
   }, [searchParams.toString()]);
-  const [adminSection, setAdminSection] = useState<'admin' | 'projects'>(
-    'admin',
-  );
-  const pageContent = useRef<HTMLElement>(null);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const searchInput = useRef<HTMLInputElement>(null);
-  const searchToggle = useRef<HTMLButtonElement>(null);
-  const closeSearch = () => {
-    setSearchOpen(false);
-    setQuery('');
-    searchToggle.current?.focus();
-  };
+  const [adminSection, setAdminSection] = useState<
+    'admin' | 'projects' | 'people'
+  >('admin');
+  const adminDirty = useRef<Record<string, boolean>>({});
+  const [adminDirtyHandlers] = useState(() => ({
+    admin: (dirty: boolean) => {
+      adminDirty.current.admin = dirty;
+    },
+    projects: (dirty: boolean) => {
+      adminDirty.current.projects = dirty;
+    },
+  }));
   useEffect(() => {
-    if (searchOpen) searchInput.current?.focus();
-  }, [searchOpen]);
+    const leave = (event: Event) => {
+      if (
+        Object.values(adminDirty.current).some(Boolean) &&
+        !confirm('Leave Admin and discard unsaved settings?')
+      )
+        event.preventDefault();
+    };
+    window.addEventListener('sentinel-before-navigation', leave);
+    return () =>
+      window.removeEventListener('sentinel-before-navigation', leave);
+  }, []);
+  const navigate = (url: string) => {
+    if (
+      Object.values(adminDirty.current).some(Boolean) &&
+      !confirm('Leave Admin and discard unsaved settings?')
+    )
+      return;
+    adminDirty.current = {};
+    router.push(url);
+  };
+  const pageContent = useRef<HTMLElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const closeSearch = () => {
+    setQuery('');
+    searchInput.current?.focus();
+  };
   const [uploadStatus, setUploadStatus] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
   const [fieldConfig, setFieldConfig] =
@@ -127,8 +167,136 @@ export default function Home({ bugId }: { bugId?: string }) {
     [comment, setComment] = useState('');
   const dialog = useRef<HTMLDialogElement>(null),
     file = useRef<HTMLInputElement>(null);
+  const attachmentsInput = useRef<HTMLInputElement>(null);
+  const reportTitleInput = useRef<HTMLInputElement>(null);
   const editorOrigin = useRef<DOMRect | null>(null);
   const draftBaseline = useRef<Report>(blank);
+  const draftKey = user ? 'account:' + user.id + ':' + user.email : 'local';
+  const [storedDraft, setStoredDraft] = useState<ReportDraft | null>(null);
+  const [draftReady, setDraftReady] = useState(false);
+  const [draftActive, setDraftActive] = useState(false);
+  const [draftStatus, setDraftStatus] = useState('');
+  const [draftError, setDraftError] = useState('');
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const draftRevision = useRef(0);
+  const creationToken = useRef('');
+  const quickReport = !editing || !!editing.quickReport;
+  const dirty = useCallback(
+    () =>
+      Object.keys(blank).some(
+        (k) =>
+          JSON.stringify(form[k as keyof Report]) !==
+          JSON.stringify(draftBaseline.current[k as keyof Report]),
+      ) ||
+      !!comment.trim() ||
+      pendingFiles.length > 0 ||
+      pendingCaptures.length > 0,
+    [form, comment, pendingFiles, pendingCaptures],
+  );
+  useEffect(() => {
+    let active = true;
+    readDraft(draftKey)
+      .then((draft) => {
+        if (active) setStoredDraft(draft);
+      })
+      .catch(() => {
+        if (active)
+          setDraftError(
+            'Automatic draft saving is unavailable in this browser. Keep this page open until you submit.',
+          );
+      })
+      .finally(() => {
+        if (active) setDraftReady(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [draftKey]);
+  const snapshotDraft = useCallback(
+    (): ReportDraft => ({
+      creationToken: creationToken.current,
+      form,
+      files: pendingFiles,
+      captures: pendingCaptures,
+      comment,
+      updatedAt: new Date().toISOString(),
+      ...(editing
+        ? { issueId: editing.id, issueCreatedAt: editing.createdAt }
+        : {}),
+    }),
+    [form, pendingFiles, pendingCaptures, comment, editing],
+  );
+  const persistDraft = useCallback(
+    async (draft: ReportDraft) => {
+      await writeDraft(draftKey, draft);
+      setStoredDraft(draft);
+    },
+    [draftKey],
+  );
+  const hasStoredDraft = storedDraft !== null;
+  useEffect(() => {
+    if (!opened || !draftActive || busy || (!dirty() && !hasStoredDraft))
+      return;
+    const revision = ++draftRevision.current;
+    setDraftStatus('Saving draft…');
+    const timer = setTimeout(() => {
+      void persistDraft(snapshotDraft())
+        .then(() => {
+          if (revision === draftRevision.current) {
+            setDraftStatus('Draft saved on this device');
+            setDraftError('');
+          }
+        })
+        .catch(() => {
+          if (revision === draftRevision.current) {
+            setDraftStatus('Draft not saved');
+            setDraftError(
+              'Could not save this draft on your device. Storage may be full. Keep this page open, remove large files, or submit your report.',
+            );
+          }
+        });
+    }, 300);
+    return () => {
+      clearTimeout(timer);
+      draftRevision.current++;
+    };
+  }, [
+    form,
+    pendingFiles,
+    pendingCaptures,
+    opened,
+    draftActive,
+    busy,
+    editing?.id,
+    dirty,
+    hasStoredDraft,
+    snapshotDraft,
+    persistDraft,
+  ]);
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (
+        opened &&
+        (busy ||
+          (dirty() &&
+            (!draftActive || draftStatus !== 'Draft saved on this device')))
+      ) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [
+    opened,
+    busy,
+    form,
+    pendingFiles,
+    pendingCaptures,
+    draftActive,
+    draftStatus,
+    comment,
+    dirty,
+  ]);
   const navigation = useRef<HTMLElement>(null);
   const [highlight, setHighlight] = useState({
     x: 0,
@@ -168,7 +336,21 @@ export default function Home({ bugId }: { bugId?: string }) {
     ]),
   );
   const newReport = (): Report => {
-    const draft = { ...blank, project: project || 'My project' };
+    const context = readReportContext(draftKey);
+    const chosen =
+      projects.find((p) => p.id === activeProjectId) ??
+      projects.find((p) => p.name === project) ??
+      projects.find((p) => p.id === context.projectId) ??
+      (projects.length === 1 ? projects[0] : undefined);
+    const remembered = chosen ? context.byProject[chosen.id] : undefined;
+    const draft = {
+      ...blank,
+      customFields: {},
+      project: chosen?.name ?? '',
+      reporter: user?.email ?? '',
+      environment: remembered?.environment ?? '',
+      version: remembered?.version ?? '',
+    };
     for (const f of fieldConfig.filter(
       (f) => f.builtin && f.type === 'select',
     )) {
@@ -211,9 +393,11 @@ export default function Home({ bugId }: { bugId?: string }) {
     const initialQuery = new URLSearchParams(window.location.search).get('q');
     if (initialQuery) {
       setQuery(initialQuery);
-      setSearchOpen(true);
     }
-    if (tab && ['board', 'projects', 'admin', 'inbox'].includes(tab))
+    if (
+      tab &&
+      ['board', 'projects', 'admin', 'inbox', 'mine', 'trash'].includes(tab)
+    )
       setView(tab);
     load()
       .catch((e) => setError(e.message))
@@ -225,8 +409,10 @@ export default function Home({ bugId }: { bugId?: string }) {
     const reduced = window.matchMedia(
       '(prefers-reduced-motion: reduce)',
     ).matches;
-    if (opened) editor.showModal();
-    else if (!editor.open) return;
+    if (opened) {
+      editor.showModal();
+      reportTitleInput.current?.focus();
+    } else if (!editor.open) return;
     if (reduced) {
       if (!opened) editor.close();
       return;
@@ -309,7 +495,7 @@ export default function Home({ bugId }: { bugId?: string }) {
             return data
               .filter((b) =>
                 (
-                  issueLabel(b.id, b.issueType) +
+                  issueLabel(b.id, b.issueType, b.issueKey) +
                   ' BUG-' +
                   b.id +
                   ' ' +
@@ -326,47 +512,160 @@ export default function Home({ bugId }: { bugId?: string }) {
     ).catch(() => {});
     return () => lifecycle.abort();
   }, []);
-  const start = (
+  const start = async (
     issue?: Issue,
     projectName?: string,
     captures: Capture[] = [],
   ) => {
+    if (!draftReady && !issue) return;
     editorOrigin.current =
       document.activeElement instanceof HTMLElement
         ? document.activeElement.getBoundingClientRect()
         : null;
-    setEditing(issue || null);
-    setPendingFiles([]);
-    setPendingCaptures(captures);
+    let restored = !issue ? storedDraft : null;
+    const restoredIssueId = restored?.issueId;
+    const savedIssue = restoredIssueId
+      ? bugs.find((b) => b.id === restoredIssueId)
+      : undefined;
+    if (
+      restored?.issueId &&
+      (!savedIssue || savedIssue.createdAt !== restored.issueCreatedAt)
+    ) {
+      setError(
+        'The issue linked to your draft is no longer available. Discard the draft before starting a new report; no files have been attached.',
+      );
+      return;
+    }
+    let captureNotice = '';
+    if (restored?.captures.length) {
+      try {
+        const inbox = await api<{ files: Capture[] }>('inbox');
+        const available = restored.captures.filter((c) =>
+          inbox.files.some((f) => f.id === c.id),
+        );
+        if (available.length !== restored.captures.length)
+          captureNotice =
+            'Some saved captures are no longer in the inbox and were removed from this draft.';
+        restored = { ...restored, captures: available };
+      } catch {
+        setError(
+          'Could not check your saved inbox captures. Please try again. Your draft is safe.',
+        );
+        return;
+      }
+    }
+    const mergedCaptures = [
+      ...(restored?.captures ?? []),
+      ...captures.filter((c) => !restored?.captures.some((f) => f.id === c.id)),
+    ];
+    if (mergedCaptures.length + (restored?.files.length ?? 0) > 20) {
+      setError(
+        'Your saved draft and this selection contain more than 20 attachments. Resume the draft and remove some files first.',
+      );
+      return;
+    }
+    setEditing(issue || savedIssue || null);
+    setPendingFiles(restored?.files ?? []);
+    setPendingCaptures(mergedCaptures);
     const draft = issue
       ? { ...blank, ...issue }
-      : { ...newReport(), ...(projectName ? { project: projectName } : {}) };
+      : restored
+        ? { ...blank, ...restored.form }
+        : { ...newReport(), ...(projectName ? { project: projectName } : {}) };
+    if (!issue && !restored && projectName) {
+      const chosen = projects.find((p) => p.name === projectName);
+      const context = chosen
+        ? readReportContext(draftKey).byProject[chosen.id]
+        : undefined;
+      draft.environment =
+        context &&
+        fieldConfig
+          .find((f) => f.key === 'environment')
+          ?.options.includes(context.environment)
+          ? context.environment
+          : '';
+      draft.version = context?.version ?? '';
+    }
     draftBaseline.current = draft;
+    creationToken.current = restored?.creationToken || crypto.randomUUID();
     setForm(draft);
-    setFormError('');
-    setComment('');
+    setFormError(captureNotice);
+    setDraftActive(!issue);
+    setDraftStatus(
+      restored
+        ? 'Draft restored · saved on this device'
+        : 'Drafts save automatically on this device',
+    );
+    setDetailsOpen(!!issue || !!savedIssue);
+    setComment(restored?.comment ?? '');
     setOpened(true);
   };
-  const dirty = () =>
-    Object.keys(blank).some(
-      (k) =>
-        JSON.stringify(form[k as keyof Report]) !==
-        JSON.stringify(draftBaseline.current[k as keyof Report]),
-    ) ||
-    !!comment.trim() ||
-    pendingFiles.length > 0 ||
-    pendingCaptures.length > 0;
-  const close = () => {
+  const close = async () => {
     if (busy) return;
-    if (dirty() && !confirm('Discard unsaved changes?')) return;
+    if (draftActive && (dirty() || storedDraft)) {
+      setBusy(true);
+      try {
+        await persistDraft(snapshotDraft());
+        setDraftError('');
+      } catch {
+        setDraftError(
+          'Your draft could not be saved. Keep the form open to submit it, or choose Discard draft.',
+        );
+        return;
+      } finally {
+        setBusy(false);
+      }
+    } else if (dirty() && !confirm('Discard unsaved changes?')) return;
     setOpened(false);
   };
-  const update = (key: string, value: string) =>
-    setForm((f) =>
-      key in blank
+  const discardDraft = async () => {
+    if (
+      busy ||
+      !confirm(
+        'Discard this draft and its selected files? Inbox captures will stay in the inbox.',
+      )
+    )
+      return;
+    setBusy(true);
+    try {
+      await writeDraft(draftKey, null);
+      setStoredDraft(null);
+      setDraftActive(false);
+      setPendingFiles([]);
+      setPendingCaptures([]);
+      setOpened(false);
+      setDraftError('');
+    } catch {
+      setDraftError('Could not remove the saved draft. Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+  const update = (key: string, value: string) => {
+    setForm((f) => {
+      if (key === 'project' && !editing) {
+        const selectedProject = projects.find((p) => p.name === value);
+        const context = selectedProject
+          ? readReportContext(draftKey).byProject[selectedProject.id]
+          : undefined;
+        return {
+          ...f,
+          project: value,
+          environment:
+            context &&
+            fieldConfig
+              .find((field) => field.key === 'environment')
+              ?.options.includes(context.environment)
+              ? context.environment
+              : '',
+          version: context?.version ?? '',
+        };
+      }
+      return key in blank
         ? { ...f, [key]: value }
-        : { ...f, customFields: { ...f.customFields, [key]: value } },
-    );
+        : { ...f, customFields: { ...f.customFields, [key]: value } };
+    });
+  };
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     if (comment.trim()) {
@@ -377,19 +676,72 @@ export default function Home({ bugId }: { bugId?: string }) {
     setFormError('');
     let savedReport: Issue | undefined;
     try {
-      const saved = await api<Issue>(
+      if (draftActive && !editing)
+        await persistDraft(snapshotDraft()).catch(() => {});
+      const saved = await api<Issue & { creationReplayed?: boolean }>(
         editing ? 'bugs/' + editing.id : 'bugs',
         editing ? 'PUT' : 'POST',
-        form,
+        editing
+          ? {
+              ...form,
+              ...(draftActive ? { expectedCreatedAt: editing.createdAt } : {}),
+            }
+          : {
+              ...form,
+              quickReport: true,
+              creationToken: creationToken.current,
+            },
       );
       setEditing(saved);
       setUploadStatus('');
       savedReport = saved;
+      if (!editing && saved.creationReplayed) {
+        await persistDraft({
+          ...snapshotDraft(),
+          issueId: saved.id,
+          issueCreatedAt: saved.createdAt,
+        }).catch(() => {});
+        setDetailsOpen(true);
+        setFormError(
+          'This issue was already created. Your latest draft is still here. Review it and choose Save changes to apply your edits and attach the selected files.',
+        );
+        await load();
+        return;
+      }
+      const savedProject =
+        projects.find(
+          (p) => p.name.toLowerCase() === saved.project.toLowerCase(),
+        ) ??
+        (await api<Project[]>('projects')).find(
+          (p) => p.name.toLowerCase() === saved.project.toLowerCase(),
+        );
+      rememberReportContext(draftKey, savedProject?.id, saved);
+      let remainingFiles = [...pendingFiles];
+      let remainingCaptures = [...pendingCaptures];
+      const saveRemaining = async () => {
+        if (!draftActive) return;
+        await persistDraft({
+          creationToken: creationToken.current,
+          form: saved,
+          files: remainingFiles,
+          captures: remainingCaptures,
+          issueId: saved.id,
+          issueCreatedAt: saved.createdAt,
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {
+          setDraftError(
+            'The report was saved, but upload progress could not be saved on this device. Keep this form open until uploads finish.',
+          );
+        });
+      };
+      await saveRemaining();
       for (const file of pendingFiles) {
         await uploadAttachment(saved.id, file, (percent) =>
           setUploadStatus(file.name + ' — ' + percent + '%'),
         );
         setPendingFiles((files) => files.filter((f) => f !== file));
+        remainingFiles = remainingFiles.filter((f) => f !== file);
+        await saveRemaining();
       }
       if (pendingCaptures.length) {
         await api('inbox/assign', 'POST', {
@@ -397,8 +749,15 @@ export default function Home({ bugId }: { bugId?: string }) {
           issueId: saved.id,
         });
         setPendingCaptures([]);
+        remainingCaptures = [];
+        await saveRemaining();
       }
       await load();
+      if (draftActive) {
+        await writeDraft(draftKey, null).catch(() => {});
+        setStoredDraft(null);
+        setDraftActive(false);
+      }
       setOpened(false);
       setUploadStatus('');
       setNotice(editing ? 'Issue updated.' : 'Issue created.');
@@ -425,9 +784,9 @@ export default function Home({ bugId }: { bugId?: string }) {
     if (
       !editing ||
       !confirm(
-        'Permanently delete ' +
-          issueLabel(editing.id, editing.issueType) +
-          '? Export a backup first if you may need it again.',
+        'Move ' +
+          issueLabel(editing.id, editing.issueType, editing.issueKey) +
+          ' to Trash? You can restore it with its attachments later.',
       )
     )
       return;
@@ -437,7 +796,9 @@ export default function Home({ bugId }: { bugId?: string }) {
       await load();
       setOpened(false);
       setUploadStatus('');
-      setNotice('Issue deleted.');
+      setNotice(
+        'Issue moved to Trash. Restore it any time from Trash in the sidebar.',
+      );
       if (bugId) router.push('/');
     } catch (e) {
       setFormError((e as Error).message);
@@ -510,21 +871,31 @@ export default function Home({ bugId }: { bugId?: string }) {
       setBusy(false);
     }
   };
-  const visible = bugs
+  const scopedBugs =
+    view === 'mine'
+      ? bugs.filter(
+          (b) =>
+            !!user && (b.assignee === user.email || b.reporter === user.email),
+        )
+      : bugs;
+  const visible = scopedBugs
     .filter(
       (b) =>
+        (view !== 'mine' ||
+          (!!user &&
+            (b.assignee === user.email || b.reporter === user.email))) &&
         (!status || b.status === status) &&
         (!priority || b.priority === priority) &&
         (!project || b.project === project) &&
         (
-          issueLabel(b.id, b.issueType) +
+          issueLabel(b.id, b.issueType, b.issueKey) +
           ' BUG-' +
           b.id +
           ' ' +
           JSON.stringify(b)
         )
           .toLowerCase()
-          .includes(view === 'list' ? query.toLowerCase() : ''),
+          .includes(['list', 'mine'].includes(view) ? query.toLowerCase() : ''),
     )
     .sort((a, b) =>
       sort === 'priority'
@@ -535,7 +906,7 @@ export default function Home({ bugId }: { bugId?: string }) {
     );
   useEffect(() => {
     setIssuePage(1);
-  }, [query, project, status, priority, sort, pageSize]);
+  }, [query, project, status, priority, sort, pageSize, view]);
   const pageCount = Math.max(1, Math.ceil(visible.length / pageSize));
   const currentPage = Math.min(issuePage, pageCount);
   const firstIssue = (currentPage - 1) * pageSize;
@@ -543,10 +914,46 @@ export default function Home({ bugId }: { bugId?: string }) {
   useEffect(() => {
     if (issuePage > pageCount) setIssuePage(pageCount);
   }, [issuePage, pageCount]);
-  const renderField = (f: FieldDefinition) => {
+  const renderField = (definition: FieldDefinition) => {
+    const f = quickReport
+      ? {
+          ...definition,
+          required:
+            ['title', 'project', 'status', 'priority'].includes(
+              definition.key,
+            ) ||
+            (definition.key === 'fixVersion' && form.status === 'Resolved'),
+        }
+      : definition;
     const value = f.builtin
       ? String(form[f.key as keyof Report] ?? '')
       : (form.customFields[f.key] ?? '');
+    if (['assignee', 'reporter'].includes(f.key))
+      return (
+        <AccountPicker
+          key={f.key}
+          value={value}
+          label={f.label}
+          required={f.required}
+          onChange={(value) => update(f.key, value)}
+        />
+      );
+    if (f.key === 'version' && f.type === 'text')
+      return (
+        <ComponentPicker
+          key={'version-' + form.project}
+          kind="version"
+          label={f.label}
+          required={f.required}
+          value={value}
+          onChange={(value) => update('version', value)}
+          options={
+            projects.find(
+              (p) => p.name.toLowerCase() === form.project.trim().toLowerCase(),
+            )?.versions ?? []
+          }
+        />
+      );
     if (f.key === 'component')
       return (
         <ComponentPicker
@@ -593,7 +1000,7 @@ export default function Home({ bugId }: { bugId?: string }) {
             value={value}
             onChange={(e) => update(f.key, e.target.value)}
           >
-            <option value="" disabled>
+            <option value="" disabled={f.required}>
               Choose…
             </option>
             {Array.from(new Set([...f.options, ...(value ? [value] : [])])).map(
@@ -606,17 +1013,20 @@ export default function Home({ bugId }: { bugId?: string }) {
           </select>
         ) : (
           <input
+            ref={f.key === 'title' ? reportTitleInput : undefined}
             type={f.type}
             step={f.type === 'number' ? 'any' : undefined}
             autoFocus={f.key === 'title'}
             required={f.required}
             maxLength={500}
             placeholder={
-              f.key === 'reproRate'
-                ? 'e.g. 3/5 attempts (60%)'
-                : f.key === 'component'
-                  ? 'e.g. Login, Payments, Settings'
-                  : undefined
+              f.key === 'title'
+                ? 'e.g. Login closes when I tap Continue'
+                : f.key === 'reproRate'
+                  ? 'e.g. 3/5 attempts (60%)'
+                  : f.key === 'component'
+                    ? 'e.g. Login, Payments, Settings'
+                    : undefined
             }
             value={value}
             onChange={(e) => update(f.key, e.target.value)}
@@ -625,78 +1035,90 @@ export default function Home({ bugId }: { bugId?: string }) {
       </label>
     );
   };
+  const queueFiles = (files: File[]) => {
+    if (busy || !files.length) return;
+    if (files.some((f) => f.size > 250_000_000)) {
+      setFormError('Each attachment must be at most 250 MB.');
+      return;
+    }
+    if (pendingFiles.length + pendingCaptures.length + files.length > 20) {
+      setFormError('Select up to 20 attachments.');
+      return;
+    }
+    setPendingFiles((current) => [...current, ...files]);
+    setFormError('');
+  };
+  const reportFields = fieldConfig
+    .filter(
+      (f) =>
+        fieldApplies(f, form.issueType) ||
+        (f.key === 'fixVersion' && form.status === 'Resolved'),
+    )
+    .map((f) =>
+      f.key === 'fixVersion' && form.status === 'Resolved'
+        ? { ...f, required: true }
+        : f,
+    );
   return (
-    <div className={'shell' + (!bugId && view === 'list' ? ' has-search' : '')}>
-      {!bugId && view === 'list' && (
-        <form
-          className={'floating-search' + (searchOpen ? ' expanded' : '')}
-          role="search"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (bugId) router.push('/?q=' + encodeURIComponent(query));
-            else if (!['list', 'board'].includes(view)) setView('list');
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'Escape') {
+    <div className="shell">
+      {searchSlot &&
+        createPortal(
+          <form
+            className="workspace-search"
+            role="search"
+            onSubmit={(event) => {
               event.preventDefault();
-              closeSearch();
-            }
-          }}
-        >
-          <button
-            type="button"
-            ref={searchToggle}
-            className="search-toggle"
-            aria-label="Search issues"
-            aria-expanded={searchOpen}
-            aria-controls="floating-issue-search"
-            onClick={() => {
-              setSearchOpen(true);
-              searchInput.current?.focus();
+              if (bugId) router.push('/?q=' + encodeURIComponent(query));
+              else if (!['list', 'board'].includes(view)) setView('list');
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                closeSearch();
+              }
             }}
           >
-            <Search size={21} />
-          </button>
-          <input
-            id="floating-issue-search"
-            ref={searchInput}
-            aria-label="Search issues"
-            placeholder={
-              bugId
-                ? 'Search issues, then press Enter…'
-                : 'Search issues by title, ID, or details…'
-            }
-            tabIndex={searchOpen ? 0 : -1}
-            disabled={!searchOpen}
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value);
-              if (!bugId && !['list', 'board'].includes(view)) setView('list');
-            }}
-          />
-          {searchOpen && (
             <button
               type="button"
-              className="search-close"
-              aria-label="Close and clear search"
-              onClick={closeSearch}
+              className="search-toggle"
+              aria-label="Search issues"
+              aria-controls="floating-issue-search"
+              onClick={() => {
+                searchInput.current?.focus();
+              }}
             >
-              <X size={18} />
+              <Search size={21} />
             </button>
-          )}
-        </form>
-      )}
+            <input
+              id="floating-issue-search"
+              ref={searchInput}
+              aria-label="Search issues"
+              placeholder={
+                bugId
+                  ? 'Search issues, then press Enter…'
+                  : 'Search issues by title, ID, or details…'
+              }
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                if (!bugId && !['list', 'board'].includes(view))
+                  setView('list');
+              }}
+            />
+            {query && (
+              <button
+                type="button"
+                className="search-close"
+                aria-label="Clear search"
+                onClick={closeSearch}
+              >
+                <X size={18} />
+              </button>
+            )}
+          </form>,
+          searchSlot,
+        )}
       <aside>
-        <div className="brand">
-          <img
-            src="/favicon.svg?v=sentinel-robot-1"
-            width={34}
-            height={34}
-            alt=""
-            className="brand-robot"
-          />{' '}
-          Sentinel
-        </div>
         <p className="eyebrow">YOUR WORKSPACE</p>
         <nav className="workspace-nav" ref={navigation} aria-label="Workspace">
           <span
@@ -711,36 +1133,54 @@ export default function Home({ bugId }: { bugId?: string }) {
           />
           <button
             className={'nav ' + (view === 'list' ? 'active' : '')}
-            onClick={() => router.push('/')}
+            onClick={() => navigate('/')}
           >
             <List size={18} /> All issues
           </button>
+          {user && (
+            <button
+              className={'nav ' + (view === 'mine' ? 'active' : '')}
+              onClick={() => navigate('/?view=mine')}
+            >
+              <UserRound size={18} /> My issues
+            </button>
+          )}
+          <button
+            className={'nav ' + (view === 'trash' ? 'active' : '')}
+            onClick={() => navigate('/?view=trash')}
+          >
+            <Trash2 size={18} /> Trash
+          </button>
           <button
             className={'nav ' + (view === 'board' ? 'active' : '')}
-            onClick={() => router.push('/?view=board')}
+            onClick={() => navigate('/?view=board')}
           >
             <Columns3 size={18} /> Status board
           </button>
           <button
             className={'nav ' + (view === 'projects' ? 'active' : '')}
-            onClick={() => router.push('/?view=projects')}
+            onClick={() => navigate('/?view=projects')}
           >
             <AppWindow size={18} /> Projects
           </button>
           <button
             className={'nav ' + (view === 'inbox' ? 'active' : '')}
-            onClick={() => router.push('/?view=inbox')}
+            onClick={() => navigate('/?view=inbox')}
           >
             <Inbox size={18} /> Attachment Inbox
           </button>
-          <button
-            className={'nav ' + (view === 'admin' ? 'active' : '')}
-            onClick={() => router.push('/?view=admin')}
-          >
-            <Settings size={18} /> Admin
-          </button>
+          {owner && (
+            <button
+              className={'nav ' + (view === 'admin' ? 'active' : '')}
+              onClick={() => navigate('/?view=admin')}
+            >
+              <Settings size={18} /> Admin
+            </button>
+          )}
         </nav>
-        <div className="local">● Local workspace</div>
+        <div className="local">
+          ● {accountsEnabled ? 'Private workspace' : 'Local workspace'}
+        </div>
       </aside>
       <main ref={pageContent}>
         {quickError && (
@@ -749,7 +1189,10 @@ export default function Home({ bugId }: { bugId?: string }) {
           </p>
         )}
         {!bugId &&
-        (view === 'projects' || view === 'admin' || view === 'inbox') ? (
+        (view === 'projects' ||
+          view === 'admin' ||
+          view === 'inbox' ||
+          view === 'trash') ? (
           loading ? (
             <p role="status">Loading workspace…</p>
           ) : error ? (
@@ -764,6 +1207,8 @@ export default function Home({ bugId }: { bugId?: string }) {
                 Retry
               </button>
             </div>
+          ) : view === 'trash' ? (
+            <IssueTrash onRefresh={load} />
           ) : view === 'inbox' ? (
             <AttachmentInbox
               issues={bugs}
@@ -783,6 +1228,8 @@ export default function Home({ bugId }: { bugId?: string }) {
               onQuick={quickChange}
               busy={quickBusy}
             />
+          ) : !owner ? (
+            <p>Only the workspace owner can access administration.</p>
           ) : (
             <>
               <nav className="admin-sections" aria-label="Admin categories">
@@ -798,7 +1245,18 @@ export default function Home({ bugId }: { bugId?: string }) {
                 >
                   Projects
                 </button>
+                {accountsEnabled && (
+                  <button
+                    aria-pressed={adminSection === 'people'}
+                    onClick={() => setAdminSection('people')}
+                  >
+                    People
+                  </button>
+                )}
               </nav>
+              {adminSection === 'people' && (
+                <PeopleSettings issues={bugs} onRefresh={load} />
+              )}
               {(['admin', 'projects'] as const).map((section) => (
                 <div key={section} hidden={adminSection !== section}>
                   <WorkspacePanel
@@ -810,6 +1268,7 @@ export default function Home({ bugId }: { bugId?: string }) {
                     projects={projects}
                     fields={fieldConfig}
                     onRefresh={load}
+                    onDirtyChange={adminDirtyHandlers[section]}
                   />
                 </div>
               ))}
@@ -862,7 +1321,10 @@ export default function Home({ bugId }: { bugId?: string }) {
           ) : (
             <section className="empty">
               <h1>Issue not found</h1>
-              <p>This issue may have been deleted.</p>
+              <p>
+                This issue may be in <Link href="/?view=trash">Trash</Link>,
+                where you can restore it.
+              </p>
               <Link className="button" href="/">
                 Back to issues
               </Link>
@@ -871,41 +1333,49 @@ export default function Home({ bugId }: { bugId?: string }) {
         ) : (
           <>
             <div className="breadcrumb">Workspace / Issues</div>
-            <header>
+            <header className="issues-heading">
               <div>
-                <p className="eyebrow">ISSUE TRACKER</p>
                 <h1>
-                  {view === 'list' ? 'All issues' : 'Status board'}
-                  <span className="count">{bugs.length}</span>
+                  {view === 'mine'
+                    ? 'My issues'
+                    : view === 'list'
+                      ? 'All issues'
+                      : 'Status board'}
+                  <span className="count">{scopedBugs.length}</span>
                 </h1>
               </div>
               <button
                 className="primary"
                 onClick={() => start()}
-                disabled={loading}
+                disabled={loading || !draftReady}
               >
-                <Plus size={18} /> New issue
+                <Plus size={18} /> {storedDraft ? 'Resume draft' : 'New issue'}
               </button>
             </header>
+            {view === 'mine' && (
+              <p className="muted">
+                Issues assigned to you or reported by you.
+              </p>
+            )}
             <div className="stats">
               {[
                 [
                   'Open issues',
-                  bugs.filter(
+                  scopedBugs.filter(
                     (b) =>
                       statusCategory(b.status, fieldConfig) !== 'completed',
                   ).length,
                 ],
                 [
                   'In progress',
-                  bugs.filter(
+                  scopedBugs.filter(
                     (b) =>
                       statusCategory(b.status, fieldConfig) === 'in-progress',
                   ).length,
                 ],
                 [
                   priorityLabel('Critical') + ' priority',
-                  bugs.filter(
+                  scopedBugs.filter(
                     (b) =>
                       b.priority === 'Critical' &&
                       statusCategory(b.status, fieldConfig) !== 'completed',
@@ -913,7 +1383,7 @@ export default function Home({ bugId }: { bugId?: string }) {
                 ],
                 [
                   'Resolved',
-                  bugs.filter(
+                  scopedBugs.filter(
                     (b) =>
                       statusCategory(b.status, fieldConfig) === 'completed',
                   ).length,
@@ -925,6 +1395,20 @@ export default function Home({ bugId }: { bugId?: string }) {
                 </div>
               ))}
             </div>
+            {storedDraft && (
+              <div className="report-draft-banner">
+                <span>
+                  <strong>Unfinished report</strong> ·{' '}
+                  {storedDraft.form.title || 'Untitled report'}
+                  {storedDraft.form.project
+                    ? ' · ' + storedDraft.form.project
+                    : ''}
+                </span>
+                <button type="button" onClick={() => void discardDraft()}>
+                  Discard draft
+                </button>
+              </div>
+            )}
             {error && (
               <div className="error" role="alert">
                 {error}{' '}
@@ -1005,30 +1489,40 @@ export default function Home({ bugId }: { bugId?: string }) {
                 <div className="empty">
                   <Bug size={38} />
                   <h2>
-                    {bugs.length
-                      ? 'No issues match these filters'
-                      : 'A fresh start for your project'}
+                    {view === 'mine' && !scopedBugs.length
+                      ? 'No issues for you yet'
+                      : bugs.length
+                        ? 'No issues match these filters'
+                        : 'A fresh start for your project'}
                   </h2>
                   <p>
-                    {bugs.length
-                      ? 'Try another search or clear your filters.'
-                      : 'Capture what went wrong, how to reproduce it, and what should happen.'}
+                    {view === 'mine' && !scopedBugs.length
+                      ? 'Issues you report or are assigned to will appear here.'
+                      : bugs.length
+                        ? 'Try another search or clear your filters.'
+                        : 'Capture what went wrong, how to reproduce it, and what should happen.'}
                   </p>
                   <button
                     className="primary"
                     onClick={() =>
-                      bugs.length
-                        ? (setQuery(''),
-                          setProject(''),
-                          setStatus(''),
-                          setPriority(''))
-                        : start()
+                      view === 'mine' && !scopedBugs.length
+                        ? start()
+                        : bugs.length
+                          ? (setQuery(''),
+                            setProject(''),
+                            setStatus(''),
+                            setPriority(''))
+                          : start()
                     }
                   >
-                    {bugs.length ? 'Clear filters' : 'Create your first issue'}
+                    {view === 'mine' && !scopedBugs.length
+                      ? 'Report an issue'
+                      : bugs.length
+                        ? 'Clear filters'
+                        : 'Create your first issue'}
                   </button>
                 </div>
-              ) : view === 'list' ? (
+              ) : ['list', 'mine'].includes(view) ? (
                 <div className="table-wrap">
                   <table>
                     <thead>
@@ -1061,7 +1555,11 @@ export default function Home({ bugId }: { bugId?: string }) {
                               href={'/bugs/' + b.id}
                             >
                               <span className="id bug-id">
-                                <IssueIdentity id={b.id} type={b.issueType} />
+                                <IssueIdentity
+                                  id={b.id}
+                                  type={b.issueType}
+                                  issueKey={b.issueKey}
+                                />
                               </span>
                               <span>{b.title}</span>
                             </Link>
@@ -1097,9 +1595,13 @@ export default function Home({ bugId }: { bugId?: string }) {
                               className="edit-icon"
                               type="button"
                               aria-label={
-                                'Edit ' + issueLabel(b.id, b.issueType)
+                                'Edit ' +
+                                issueLabel(b.id, b.issueType, b.issueKey)
                               }
-                              title={'Edit ' + issueLabel(b.id, b.issueType)}
+                              title={
+                                'Edit ' +
+                                issueLabel(b.id, b.issueType, b.issueKey)
+                              }
                               onClick={() => start(b)}
                               disabled={busy}
                             >
@@ -1156,7 +1658,11 @@ export default function Home({ bugId }: { bugId?: string }) {
                               href={'/bugs/' + b.id}
                             >
                               <span className="id bug-id">
-                                <IssueIdentity id={b.id} type={b.issueType} />
+                                <IssueIdentity
+                                  id={b.id}
+                                  type={b.issueType}
+                                  issueKey={b.issueKey}
+                                />
                               </span>
                               <ProjectBadge
                                 name={b.project}
@@ -1178,7 +1684,7 @@ export default function Home({ bugId }: { bugId?: string }) {
                   ))}
                 </div>
               )}
-              {view === 'list' && (
+              {['list', 'mine'].includes(view) && (
                 <div className="issue-pagination">
                   <label>
                     Issues per page
@@ -1256,33 +1762,43 @@ export default function Home({ bugId }: { bugId?: string }) {
                 <span>Saved on this computer</span>
               </div>
             </section>
-            <div className="actions">
-              <input
-                ref={file}
-                hidden
-                type="file"
-                accept="application/json,.json"
-                onChange={(e) => {
-                  void restore(e.target.files?.[0]);
-                  e.target.value = '';
-                }}
-              />
-              <button
-                disabled={busy || loading}
-                onClick={() => file.current?.click()}
-              >
-                <Upload size={16} /> Import backup
-              </button>
-              <button disabled={loading} onClick={backup}>
-                <Download size={16} /> Export backup
-              </button>
-            </div>
+            {owner && (
+              <div className="actions">
+                <input
+                  ref={file}
+                  hidden
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={(e) => {
+                    void restore(e.target.files?.[0]);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  disabled={busy || loading}
+                  onClick={() => file.current?.click()}
+                >
+                  <Upload size={16} /> Import backup
+                </button>
+                <button disabled={loading} onClick={backup}>
+                  <Download size={16} /> Export backup
+                </button>
+              </div>
+            )}
           </>
         )}
       </main>
       <dialog
         ref={dialog}
-        className="modal"
+        className={'modal ' + (!editing ? 'quick-report-modal' : '')}
+        aria-labelledby="report-heading"
+        onPaste={(e) => {
+          const files = Array.from(e.clipboardData.files);
+          if (files.length) {
+            e.preventDefault();
+            queueFiles(files);
+          }
+        }}
         onCancel={(e) => {
           e.preventDefault();
           close();
@@ -1292,10 +1808,17 @@ export default function Home({ bugId }: { bugId?: string }) {
           <div>
             <p className="eyebrow">
               {editing
-                ? issueLabel(editing.id, editing.issueType)
+                ? issueLabel(editing.id, editing.issueType, editing.issueKey)
                 : 'NEW REPORT'}
             </p>
-            <h2>{editing ? 'Edit issue' : 'Create an issue'}</h2>
+            <h2 id="report-heading">
+              {editing ? 'Edit issue' : 'Report a problem'}
+            </h2>
+            {!editing && (
+              <p className="muted">
+                Capture it now. Add the details when you’re ready.
+              </p>
+            )}
           </div>
           <button aria-label="Close issue details" onClick={close}>
             <X size={18} />
@@ -1306,54 +1829,86 @@ export default function Home({ bugId }: { bugId?: string }) {
             {formError}
           </div>
         )}
+        {draftActive && draftError && (
+          <p className="error" role="alert">
+            {draftError}
+          </p>
+        )}
         <form onSubmit={save}>
           <fieldset
             disabled={busy}
             style={{ border: 0, padding: 0, margin: 0 }}
           >
-            <div className="form-grid">
-              {fieldConfig
-                .filter(
-                  (f) =>
-                    fieldApplies(f, form.issueType) ||
-                    (f.key === 'fixVersion' && form.status === 'Resolved'),
-                )
-                .map((f) =>
-                  f.key === 'fixVersion' && form.status === 'Resolved'
-                    ? { ...f, required: true }
-                    : f,
-                )
-                .map(renderField)}
-            </div>
+            {!editing ? (
+              <div className="quick-report-fields">
+                {['project', 'title'].map((key) =>
+                  renderField(
+                    fieldConfig.find((f) => f.key === key) ??
+                      defaultFields.find((f) => f.key === key)!,
+                  ),
+                )}
+                {fieldConfig.find((f) => f.key === 'description')?.enabled && (
+                  <label>
+                    What went wrong?{' '}
+                    <span className="optional-label">Optional</span>
+                    <textarea
+                      rows={3}
+                      maxLength={20000}
+                      value={form.description}
+                      placeholder="What were you doing, and what happened?"
+                      onChange={(e) => update('description', e.target.value)}
+                    />
+                  </label>
+                )}
+              </div>
+            ) : (
+              <>
+                {quickReport && (
+                  <p className="muted quick-report-help">
+                    This is a quick report. Add any details you have; only the
+                    title, project, status and priority are required.
+                  </p>
+                )}
+                <div className="form-grid">{reportFields.map(renderField)}</div>
+              </>
+            )}
             <section className="attachment-staging">
               {busy && uploadStatus && (
                 <p role="status">Uploading {uploadStatus}</p>
               )}
-              <label>
-                Add attachments
+              <div
+                className="report-evidence"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  queueFiles(Array.from(e.dataTransfer.files));
+                }}
+              >
+                <div>
+                  <strong>Screenshots &amp; files</strong>
+                  <p className="muted">
+                    Drop files here, paste a screenshot, or browse.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => attachmentsInput.current?.click()}
+                >
+                  <Upload size={16} /> Browse files
+                </button>
                 <input
+                  ref={attachmentsInput}
+                  hidden
+                  aria-label="Add attachments"
                   type="file"
                   multiple
                   onChange={(e) => {
                     const files = Array.from(e.target.files ?? []);
                     e.target.value = '';
-                    if (files.some((f) => f.size > 250_000_000)) {
-                      setFormError('Each attachment must be at most 250 MB.');
-                      return;
-                    }
-                    if (
-                      pendingFiles.length +
-                        pendingCaptures.length +
-                        files.length >
-                      20
-                    ) {
-                      setFormError('Select up to 20 attachments.');
-                      return;
-                    }
-                    setPendingFiles((current) => [...current, ...files]);
+                    queueFiles(files);
                   }}
                 />
-              </label>
+              </div>
               <p className="muted">
                 Files upload when you save the issue. Up to 250 MB per file.
               </p>
@@ -1363,8 +1918,8 @@ export default function Home({ bugId }: { bugId?: string }) {
                     {pendingCaptures.length} captures from Attachment Inbox
                   </strong>
                   <p className="muted">
-                    These will be attached when you save. Closing this form
-                    leaves them in the inbox.
+                    These will be attached when you submit. They stay in the
+                    inbox until then.
                   </p>
                   {pendingCaptures.map((capture) => (
                     <div key={capture.id}>
@@ -1403,18 +1958,59 @@ export default function Home({ bugId }: { bugId?: string }) {
                 ))}
               </ul>
             </section>
-            <div className="actions">
-              {editing && (
-                <button type="button" className="danger" onClick={remove}>
-                  Delete issue
+            {!editing && (
+              <section className="report-extra-details">
+                <button
+                  className="details-toggle"
+                  type="button"
+                  aria-expanded={detailsOpen}
+                  aria-controls="report-extra-fields"
+                  onClick={() => setDetailsOpen(!detailsOpen)}
+                >
+                  <Plus size={16} />{' '}
+                  {detailsOpen ? 'Hide additional details' : 'Add more details'}
+                  <span>Type, steps, device, build, priority…</span>
                 </button>
+                {detailsOpen && (
+                  <div className="form-grid" id="report-extra-fields">
+                    {reportFields
+                      .filter(
+                        (f) =>
+                          !['project', 'title', 'description'].includes(f.key),
+                      )
+                      .map(renderField)}
+                  </div>
+                )}
+              </section>
+            )}
+            <div className="report-form-footer">
+              {draftActive && (
+                <span className="draft-save-status" role="status">
+                  {draftStatus}
+                </span>
               )}
-              <button type="button" onClick={close}>
-                Cancel
-              </button>
-              <button className="primary" type="submit">
-                {busy ? 'Saving…' : editing ? 'Save changes' : 'Create issue'}
-              </button>
+              <div className="actions">
+                {editing && (
+                  <button type="button" className="danger" onClick={remove}>
+                    Delete issue
+                  </button>
+                )}
+                {draftActive && (
+                  <button
+                    type="button"
+                    className="draft-discard"
+                    onClick={() => void discardDraft()}
+                  >
+                    Discard draft
+                  </button>
+                )}
+                <button type="button" onClick={close}>
+                  {draftActive ? 'Save for later' : 'Cancel'}
+                </button>
+                <button className="primary" type="submit">
+                  {busy ? 'Saving…' : editing ? 'Save changes' : 'Create issue'}
+                </button>
+              </div>
             </div>
           </fieldset>
         </form>
@@ -1428,7 +2024,9 @@ export default function Home({ bugId }: { bugId?: string }) {
             {editing.comments.length ? (
               editing.comments.map((c, i) => (
                 <div className="comment" key={i}>
-                  <small>{date(c.at)}</small>
+                  <small>
+                    {c.actor?.email ?? 'Earlier activity'} · {date(c.at)}
+                  </small>
                   <p>{c.text}</p>
                 </div>
               ))
@@ -1440,6 +2038,7 @@ export default function Home({ bugId }: { bugId?: string }) {
             <label style={{ marginTop: 16 }}>
               New comment
               <textarea
+                disabled={busy}
                 value={comment}
                 maxLength={20000}
                 onChange={(e) => setComment(e.target.value)}
@@ -1453,7 +2052,9 @@ export default function Home({ bugId }: { bugId?: string }) {
             <h2>Activity</h2>
             {[...editing.history].reverse().map((h, i) => (
               <p key={i}>
-                <small>{date(h.at)}</small>
+                <small>
+                  {h.actor?.email ?? 'Earlier activity'} · {date(h.at)}
+                </small>
                 <br />
                 {h.text}
               </p>

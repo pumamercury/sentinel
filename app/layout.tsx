@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { AccountGate } from '../components/account-gate';
 export const metadata: Metadata = {
   title: 'Sentinel — Local bug tracker',
   description: 'Your local workspace for tracking bugs and documenting fixes.',
@@ -14,8 +15,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <AccountGate>{children}</AccountGate>
+      </body>
     </html>
   );
 }
-

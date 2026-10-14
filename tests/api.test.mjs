@@ -108,10 +108,10 @@ test('CRUD, comments, persistence, backup validation and local access protection
     assert.equal((await request('bugs/' + id, 'DELETE')).status, 404);
     assert.equal((await request('bugs')).data.length, 1);
     const replacement = (await request('bugs', 'POST', input)).data;
-    assert.equal(replacement.id, id, 'new bugs reuse the lowest free number');
+    assert.equal(replacement.id, 3, 'trashed issue numbers stay reserved');
     assert.equal((await request('bugs')).data.length, 2);
     const next = (await request('bugs', 'POST', input)).data;
-    assert.equal(next.id, 3, 'occupied numbers are never reused');
+    assert.equal(next.id, 4, 'occupied numbers are never reused');
     for (const bug of (await request('bugs')).data) {
       await request('bugs/' + bug.id, 'DELETE');
     }
@@ -119,8 +119,8 @@ test('CRUD, comments, persistence, backup validation and local access protection
     await open();
     assert.equal(
       (await request('bugs', 'POST', input)).data.id,
-      1,
-      'an empty database starts at BUG-1 even after reopening',
+      5,
+      'trashed numbers remain reserved after reopening',
     );
   } finally {
     await close();

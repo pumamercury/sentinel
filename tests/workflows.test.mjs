@@ -352,7 +352,7 @@ test('type scopes, status categories, quick updates, bidirectional links and bac
     await request(`bugs/${custom.id}`, 'DELETE');
     const reused = (await request('bugs', 'POST', { ...draft, steps: 'Again' }))
       .data;
-    assert.equal(reused.id, custom.id);
+    assert.notEqual(reused.id, custom.id);
     assert.equal((await request(`bugs/${reused.id}/links`)).data.length, 0);
     assert.equal((await request(`bugs/${bug.id}/links`)).data.length, 0);
   } finally {

@@ -1,6 +1,11 @@
+import { validateReport as validate, reportFields as fields } from '../lib/report-validation.mjs';
+import { projectCsv } from './project-export.mjs';
+import { issueNumbering } from './issue-numbering.mjs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { defaultFields, fieldApplies } from '../lib/field-schema.mjs';
 import { workspace } from './workspace.mjs';
 import { captureInbox } from './capture-inbox.mjs';
+import { authentication } from './auth.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -12,98 +17,19 @@ export const statuses = [
   'Closed',
 ];
 export const priorities = ['Low', 'Medium', 'High', 'Critical'];
-const fields = [
-  'title',
-  'project',
-  'description',
-  'steps',
-  'expected',
-  'actual',
-  'environment',
-  'assignee',
-  'labels',
-  'version',
-  'dueDate',
-  'status',
-  'priority',
-  'severity',
-];
-function validate(input, definitions = defaultFields) {
-  if (!input || typeof input !== 'object' || Array.isArray(input))
-    throw Error('Invalid bug report.');
-  const out = {};
-  out.issueType = input.issueType ?? 'Bug';
-  if (typeof out.issueType !== 'string' || out.issueType.length > 500)
-    throw Error('Invalid issue type.');
-  out.issueType = out.issueType.trim();
-  const typeOptions = definitions.find((f) => f.key === 'issueType')
-    ?.options ?? ['Bug', 'Idea', 'Task', 'Feature request'];
-  if (out.issueType && !typeOptions.includes(out.issueType))
-    throw Error('Invalid issue type.');
-  for (const key of fields) {
-    if (
-      typeof input[key] !== 'string' ||
-      input[key].length >
-        (['description', 'steps', 'expected', 'actual'].includes(key)
-          ? 20000
-          : 500)
-    )
-      throw Error(`Invalid ${key}.`);
-    out[key] = input[key].trim();
-  }
-  for (const key of ['reproRate', 'component', 'reporter', 'fixVersion']) {
-    out[key] = input[key] === undefined ? '' : input[key];
-    if (typeof out[key] !== 'string' || out[key].length > 500)
-      throw Error('Invalid ' + key);
-    out[key] = out[key].trim();
-  }
-  if (out.status === 'Resolved' && !out.fixVersion)
-    throw Error('Fix Version is required to resolve an issue.');
-  for (const key of ['solution', 'acceptance']) {
-    if (
-      input[key] !== undefined &&
-      (typeof input[key] !== 'string' || input[key].length > 20000)
-    )
-      throw Error('Invalid ' + key);
-    out[key] = (input[key] ?? '').trim();
-  }
-  out.customFields = {};
-  if (input.customFields !== undefined) {
-    if (
-      !input.customFields ||
-      typeof input.customFields !== 'object' ||
-      Array.isArray(input.customFields) ||
-      Object.keys(input.customFields).length > 60
-    )
-      throw Error('Invalid custom fields.');
-    for (const [key, value] of Object.entries(input.customFields)) {
-      if (
-        !/^custom_[a-zA-Z0-9_-]{1,80}$/.test(key) ||
-        typeof value !== 'string' ||
-        value.length > 20000
-      )
-        throw Error('Invalid custom field value.');
-      out.customFields[key] = value.trim();
-    }
-  }
-  if (!out.title || !out.project)
-    throw Error('Title and project are required.');
-  for (const key of ['status', 'priority', 'severity']) {
-    const options = definitions.find((f) => f.key === key)?.options ?? [];
-    if (out[key] && !options.includes(out[key]))
-      throw Error('Invalid ' + key + '.');
-  }
-  if (out.dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(out.dueDate))
-    throw Error('Invalid due date.');
-  return out;
-}
-export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
+export function createApi(
+  path = resolve(process.env.SENTINEL_DATA_DIR || 'data', 'bugbook.sqlite'),
+  options = {},
+) {
   mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
+  const auth = authentication(db, options.auth);
   db.exec(
     'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS bugs (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);',
   );
-  const list = () =>
+  let assignNumber;
+  const activity = new AsyncLocalStorage();
+  const list = (includeTrash = false) =>
     db
       .prepare('SELECT id,data FROM bugs ORDER BY id DESC')
       .all()
@@ -116,10 +42,11 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
         customFields: {},
         ...JSON.parse(row.data),
         id: row.id,
-      }));
-  const get = (id) => {
+      }))
+      .filter((bug) => includeTrash || !bug.deletedAt);
+  const get = (id, includeTrash = false) => {
     const row = db.prepare('SELECT data FROM bugs WHERE id=?').get(id);
-    return row
+    return row && (includeTrash || !JSON.parse(row.data).deletedAt)
       ? {
           reproRate: '',
           issueType: 'Bug',
@@ -132,12 +59,38 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
         }
       : null;
   };
-  const save = (bug) =>
-    db
-      .prepare('UPDATE bugs SET data=? WHERE id=?')
-      .run(JSON.stringify(bug), bug.id);
-  const insert = (bug) =>
-    Number(
+  const stamp = (bug, previous) => {
+    const actor = activity.getStore()?.actor;
+    if (!actor) return;
+    for (const key of ['history', 'comments']) {
+      for (const entry of (bug[key] ?? []).slice(previous?.[key]?.length ?? 0))
+        entry.actor = actor;
+    }
+  };
+  const save = (bug) => {
+    assignNumber?.(bug);
+    stamp(bug, get(bug.id, true));
+    db.prepare('UPDATE bugs SET data=? WHERE id=?').run(
+      JSON.stringify(bug),
+      bug.id,
+    );
+  };
+  const members = () =>
+    db.prepare('SELECT id,email,disabled FROM auth_users ORDER BY email').all();
+  const validatePeople = (data, previous) => {
+    if (!activity.getStore()?.actor?.id) return;
+    for (const key of ['assignee', 'reporter']) {
+      if (!data[key] || data[key] === previous?.[key]) continue;
+      const member = members().find(
+        (m) => !m.disabled && m.email === data[key].trim().toLowerCase(),
+      );
+      if (!member) throw Error(`Choose an invited account for ${key}.`);
+      data[key] = member.email;
+    }
+  };
+  const insert = (bug) => {
+    assignNumber?.(bug);
+    return Number(
       db
         .prepare(`INSERT INTO bugs(id,data)
         SELECT MIN(candidate), ? FROM (
@@ -145,7 +98,30 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
         ) WHERE NOT EXISTS (SELECT 1 FROM bugs WHERE id = candidate)`)
         .run(JSON.stringify(bug)).lastInsertRowid,
     );
-  const ws = workspace(db, { list, get, save }, dirname(path));
+  };
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bugs_creation_token
+    ON bugs(json_extract(data, '$.creationToken'), COALESCE(json_extract(data, '$.creationAccountId'), 0))
+    WHERE json_extract(data, '$.creationToken') IS NOT NULL`);
+  const ws = workspace(
+    db,
+    { list: () => list(true), get, save },
+    dirname(path),
+  );
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    assignNumber = issueNumbering(db);
+    for (const bug of list(true).sort(
+      (a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id,
+    )) {
+      const before = JSON.stringify(bug);
+      assignNumber(bug);
+      if (JSON.stringify(bug) !== before) save(bug);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
   const inbox = captureInbox(db, { get, save }, dirname(path), options.capture);
   db.exec(`CREATE TABLE IF NOT EXISTS issue_links (
     source INTEGER NOT NULL REFERENCES bugs(id) ON DELETE CASCADE,
@@ -160,7 +136,9 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
     bug.history.push({ at: bug.updatedAt, text });
     save(bug);
   };
-  async function handler(req, res, next) {
+  const handler = (req, res, next) =>
+    activity.run({}, () => handleRequest(req, res, next));
+  async function handleRequest(req, res, next) {
     if (!req.url?.startsWith('/api/')) return next();
     const send = (code, data) => {
       res.writeHead(code, {
@@ -172,17 +150,80 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
     const host = req.headers.host;
     if (
       !host ||
-      !['127.0.0.1', 'localhost', '[::1]'].some(
-        (h) => host === h || host.startsWith(h + ':'),
-      )
+      (!auth.origin &&
+        !['127.0.0.1', 'localhost', '[::1]'].some(
+          (h) => host === h || host.startsWith(h + ':'),
+        ))
     )
       return send(403, { error: 'Local access only.' });
-    if (req.headers.origin && req.headers.origin !== `http://${host}`)
+    if (
+      req.headers.origin &&
+      req.headers.origin !== (auth.origin || `http://${host}`)
+    )
       return send(403, { error: 'Origin rejected.' });
     const url = new URL(req.url, `http://${host}`);
     try {
+      if (await auth.guard(req, res, url, send)) return;
+      activity.getStore().actor = req.sentinelAccountId
+        ? db
+            .prepare('SELECT id,email FROM auth_users WHERE id=?')
+            .get(req.sentinelAccountId)
+        : { email: 'Local workspace' };
+      if (req.method === 'GET' && url.pathname === '/api/members')
+        return send(200, members());
+      if (req.method === 'GET' && url.pathname === '/api/trash')
+        return send(
+          200,
+          list(true).filter((b) => b.deletedAt),
+        );
       if (req.method === 'GET' && url.pathname === '/api/bugs')
         return send(200, list());
+      const projectExport = url.pathname.match(
+        /^\/api\/projects\/(\d+)\/export$/,
+      );
+      if (req.method === 'GET' && projectExport) {
+        const project = ws
+          .projects()
+          .find((p) => p.id === Number(projectExport[1]));
+        if (!project) return send(404, { error: 'Project not found.' });
+        const basis = url.searchParams.get('basis') || 'createdAt';
+        if (!['createdAt', 'updatedAt'].includes(basis))
+          throw Error('Choose created or updated date.');
+        const from = url.searchParams.get('from'),
+          to = url.searchParams.get('to');
+        const lower = from ? Date.parse(from) : -Infinity,
+          upper = to ? Date.parse(to) : Infinity;
+        if (Number.isNaN(lower) || Number.isNaN(upper) || lower >= upper)
+          throw Error('Choose a valid date range.');
+        const type = url.searchParams.get('type');
+        const reports = list()
+          .filter(
+            (b) =>
+              b.project.toLowerCase() === project.name.toLowerCase() &&
+              (!type || b.issueType === type) &&
+              Date.parse(b[basis]) >= lower &&
+              Date.parse(b[basis]) < upper,
+          )
+          .sort(
+            (a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id,
+          );
+        const csv = projectCsv(reports, ws.config(), (id) =>
+          db
+            .prepare(
+              'SELECT name FROM attachments WHERE bug_id=? ORDER BY created_at,id',
+            )
+            .all(id),
+        );
+        res.writeHead(200, {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Content-Disposition':
+            'attachment; filename="sentinel-project-' + project.id + '.csv"',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        res.end(csv);
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/api/backup') {
         const size = db
           .prepare(
@@ -197,12 +238,22 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
         return send(200, {
           schemaVersion: 2,
           exportedAt: new Date().toISOString(),
-          bugs: list().map(ws.exportBug),
+          bugs: list(true).map(ws.exportBug),
           projects: ws.projects(),
           fields: ws.config(),
           links: allLinks(),
           inbox: inbox.exportFiles(),
         });
+      }
+      const restoreMatch = url.pathname.match(/^\/api\/trash\/(\d+)\/restore$/);
+      if (restoreMatch && req.method === 'POST') {
+        const bug = get(Number(restoreMatch[1]), true);
+        if (!bug?.deletedAt)
+          return send(404, { error: 'This issue is no longer in Trash.' });
+        delete bug.deletedAt;
+        delete bug.deletedBy;
+        recordChange(bug, 'Restored from Trash');
+        return send(200, bug);
       }
       const rawUpload = url.pathname.match(/^\/api\/bugs\/(\d+)\/attachments$/);
       if (
@@ -232,7 +283,7 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
         }
       }
       if (await inbox.handle(req, res, url, body, send)) return;
-      if (ws.handle(req, res, url, body, send)) return;
+      if (await ws.handle(req, res, url, body, send)) return;
       const quick = url.pathname.match(/^\/api\/bugs\/(\d+)\/quick$/);
       if (quick && req.method === 'POST') {
         const bug = get(Number(quick[1]));
@@ -274,7 +325,12 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
           return send(
             200,
             allLinks()
-              .filter((l) => l.source === id || l.target === id)
+              .filter(
+                (l) =>
+                  (l.source === id || l.target === id) &&
+                  get(l.source) &&
+                  get(l.target),
+              )
               .map((l) => ({
                 ...l,
                 label:
@@ -334,19 +390,110 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
         }
       }
       if (req.method === 'POST' && url.pathname === '/api/bugs') {
-        const data = validate(body, ws.config());
-        ws.validateValues(data);
-        data.project = ws.ensureProject(data.project);
-        data.component = ws.ensureComponent(data.project, data.component);
-        const now = new Date().toISOString();
-        const bug = {
-          ...data,
-          createdAt: now,
-          updatedAt: now,
-          comments: [],
-          history: [{ at: now, text: 'Issue created' }],
-        };
-        return send(201, { ...bug, id: insert(bug) });
+        let creationToken;
+        if (body.creationToken !== undefined) {
+          if (
+            body.quickReport !== true ||
+            typeof body.creationToken !== 'string' ||
+            !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(
+              body.creationToken,
+            )
+          )
+            throw Error('Invalid report creation token.');
+          creationToken = body.creationToken.toLowerCase();
+        }
+        const creationAccountId = req.sentinelAccountId ?? null;
+        // Persist the token with the issue, and serialize lookup/create so a
+        // retry after a lost response can never create a second live issue.
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          const existing =
+            creationToken &&
+            db
+              .prepare(
+                `SELECT id FROM bugs WHERE json_extract(data, '$.creationToken')=?
+             AND COALESCE(json_extract(data, '$.creationAccountId'), 0)=?`,
+              )
+              .get(creationToken, creationAccountId ?? 0);
+          if (existing) {
+            const bug = get(existing.id);
+            if (!bug)
+              throw Error(
+                'This report is in Trash. Restore it before continuing.',
+              );
+            db.exec('COMMIT');
+            return send(200, { ...bug, creationReplayed: true });
+          }
+          const data = validate(
+            {
+              ...body,
+              reporter:
+                body.reporter ||
+                (req.sentinelAccountId ? activity.getStore().actor?.email : ''),
+            },
+            ws.config(),
+          );
+          validatePeople(data);
+          ws.validateValues(data);
+          data.project = ws.ensureProject(data.project);
+          data.component = ws.ensureComponent(data.project, data.component);
+          data.version = ws.ensureVersion(data.project, data.version);
+          const now = new Date().toISOString();
+          const bug = {
+            ...data,
+            ...(creationToken ? { creationToken, creationAccountId } : {}),
+            createdAt: now,
+            updatedAt: now,
+            comments: [],
+            history: [{ at: now, text: 'Issue created' }],
+          };
+          stamp(bug);
+          const id = insert(bug);
+          db.exec('COMMIT');
+          return send(201, { ...bug, id });
+        } catch (error) {
+          db.exec('ROLLBACK');
+          throw error;
+        }
+      }
+      if (req.method === 'POST' && url.pathname === '/api/people/link') {
+        const actor = activity.getStore().actor;
+        const account =
+          actor.id &&
+          db.prepare('SELECT role FROM auth_users WHERE id=?').get(actor.id);
+        if (account?.role !== 'owner')
+          return send(403, { error: 'Owner access required.' });
+        const member = members().find(
+          (m) => !m.disabled && m.email === body.email,
+        );
+        if (
+          !member ||
+          typeof body.legacy !== 'string' ||
+          !body.legacy.trim() ||
+          members().some((m) => m.email === body.legacy)
+        )
+          throw Error('Choose an older name and an active account.');
+        let updated = 0;
+        db.exec('BEGIN');
+        try {
+          for (const bug of list(true)) {
+            const keys = ['assignee', 'reporter'].filter(
+              (key) => bug[key] === body.legacy,
+            );
+            if (!keys.length) continue;
+            for (const key of keys) bug[key] = member.email;
+            recordChange(
+              bug,
+              `Linked ${keys.join(' and ')}: ${body.legacy} → ${member.email}`,
+            );
+            updated++;
+          }
+          db.exec('COMMIT');
+        } catch (error) {
+          db.exec('ROLLBACK');
+          throw error;
+        }
+        return send(200, { updated });
       }
       if (req.method === 'POST' && url.pathname === '/api/import') {
         if (
@@ -364,8 +511,8 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
           throw Error(
             'Backup issue IDs must be unique when links are present.',
           );
-        const incoming = body.bugs.map((b) => {
-          const clean = validate(b, body.fields ?? defaultFields);
+        const incoming = importWorkspace.bugs.map((b) => {
+          const clean = validate(b, importWorkspace.fields);
           if (!Array.isArray(b.comments) || !Array.isArray(b.history))
             throw Error('Invalid backup history.');
           const date = (v) =>
@@ -393,18 +540,39 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
             ...clean,
             createdAt: b.createdAt,
             updatedAt: b.updatedAt,
-            comments: b.comments.map((c) => ({ text: c.text, at: c.at })),
-            history: b.history.map((h) => ({ text: h.text, at: h.at })),
+            ...(typeof b.deletedAt === 'string' && date(b.deletedAt)
+              ? {
+                  deletedAt: b.deletedAt,
+                  ...(typeof b.deletedBy?.email === 'string'
+                    ? { deletedBy: { email: b.deletedBy.email.slice(0, 500) } }
+                    : {}),
+                }
+              : {}),
+            comments: b.comments.map((c) => ({
+              text: c.text,
+              at: c.at,
+              ...(typeof c.actor?.email === 'string'
+                ? { actor: { email: c.actor.email.slice(0, 500) } }
+                : {}),
+            })),
+            history: b.history.map((h) => ({
+              text: h.text,
+              at: h.at,
+              ...(typeof h.actor?.email === 'string'
+                ? { actor: { email: h.actor.email.slice(0, 500) } }
+                : {}),
+            })),
           };
         });
         db.exec('BEGIN');
         try {
-          importWorkspace();
+          importWorkspace.apply();
           importInbox();
           const idMap = new Map();
           for (const [index, bug] of incoming.entries()) {
             bug.project = ws.ensureProject(bug.project);
             bug.component = ws.ensureComponent(bug.project, bug.component);
+            bug.version = ws.ensureVersion(bug.project, bug.version);
             const id = insert(bug);
             idMap.set(body.bugs[index].id, id);
             for (const file of body.bugs[index].attachments ?? [])
@@ -441,13 +609,22 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
         const bug = get(Number(match[1]));
         if (!bug) return send(404, { error: 'Bug not found.' });
         if (req.method === 'DELETE' && !match[2]) {
-          const fileIds = ws.bugFileIds(bug.id);
-          db.prepare('DELETE FROM bugs WHERE id=?').run(bug.id);
-          for (const id of fileIds) ws.removeDiskFile(id);
+          bug.deletedAt = new Date().toISOString();
+          bug.deletedBy = activity.getStore().actor;
+          recordChange(bug, 'Moved to Trash');
           return send(200, { deleted: true });
         }
         const now = new Date().toISOString();
         if (['PUT', 'PATCH'].includes(req.method) && !match[2]) {
+          if (
+            req.method === 'PUT' &&
+            body.expectedCreatedAt !== undefined &&
+            body.expectedCreatedAt !== bug.createdAt
+          )
+            return send(409, {
+              error:
+                'The original issue is no longer available. This issue number now belongs to another report.',
+            });
           let input = body;
           if (req.method === 'PATCH') {
             const field = ws.config().find((f) => f.key === body.field);
@@ -477,10 +654,17 @@ export function createApi(path = resolve('data/bugbook.sqlite'), options = {}) {
                   },
                 };
           }
-          const data = validate(input, ws.config());
+          // Reporting mode belongs to the saved issue; editing cannot bypass the
+          // required fields of a full report by adding a quickReport flag.
+          const data = validate(
+            { ...input, quickReport: bug.quickReport === true },
+            ws.config(),
+          );
+          validatePeople(data, bug);
           ws.validateValues(data);
           data.project = ws.ensureProject(data.project);
           data.component = ws.ensureComponent(data.project, data.component);
+          data.version = ws.ensureVersion(data.project, data.version);
           const changes = [
             ...fields,
             'reproRate',

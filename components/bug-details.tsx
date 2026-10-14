@@ -70,7 +70,14 @@ export function BugDetails({
     <InlineField
       key={b.id + ':' + f.key}
       issueId={b.id}
-      field={{ ...f, label: fieldLabel(f, b.issueType) }}
+      field={{
+        ...f,
+        label: fieldLabel(f, b.issueType),
+        required: b.quickReport
+          ? ['title', 'project', 'status', 'priority'].includes(f.key) ||
+            (f.key === 'fixVersion' && b.status === 'Resolved')
+          : f.required,
+      }}
       value={value(f)}
       projects={projects}
       project={b.project}
@@ -123,7 +130,7 @@ export function BugDetails({
         <Link href="/">Workspace / Issues</Link>
         <span className="bug-id">
           {' '}
-          / <IssueIdentity id={b.id} type={b.issueType} />
+          / <IssueIdentity id={b.id} type={b.issueType} issueKey={b.issueKey} />
         </span>
       </div>
       <Link className="back-link" href={backHref}>
@@ -143,7 +150,7 @@ export function BugDetails({
             <ProjectBadge name={b.project} projects={projects} details />
           </Link>
           <p className="eyebrow bug-id">
-            <IssueIdentity id={b.id} type={b.issueType} />
+            <IssueIdentity id={b.id} type={b.issueType} issueKey={b.issueKey} />
           </p>
           <div className="inline-title">
             {enabled.find((f) => f.key === 'title') ? (
@@ -212,7 +219,7 @@ export function BugDetails({
               renderPanel(f)
             );
           })}
-          <Attachments key={b.updatedAt} bugId={b.id} />
+          <Attachments key={b.updatedAt} bugId={b.id} onRefresh={onRefresh} />
           <IssueLinks
             key={b.id}
             issue={b}
@@ -227,7 +234,10 @@ export function BugDetails({
             {b.comments.length ? (
               b.comments.map((c, i) => (
                 <article className="comment" key={i}>
-                  <time dateTime={c.at}>{date(c.at)}</time>
+                  <small>
+                    {c.actor?.email ?? 'Earlier activity'} ·{' '}
+                    <time dateTime={c.at}>{date(c.at)}</time>
+                  </small>
                   <p className="report-text">{c.text}</p>
                 </article>
               ))
@@ -318,7 +328,10 @@ export function BugDetails({
                   ) : (
                     <p>{h.text}</p>
                   )}
-                  <time dateTime={h.at}>{date(h.at)}</time>
+                  <small>
+                    {h.actor?.email ?? 'Earlier activity'} ·{' '}
+                    <time dateTime={h.at}>{date(h.at)}</time>
+                  </small>
                 </div>
               ))}
             </div>

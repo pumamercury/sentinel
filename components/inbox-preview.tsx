@@ -11,7 +11,8 @@ export function InboxPreview({ file }: { file: Attachment }) {
     video = useRef<HTMLVideoElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const title = useId();
-  const url = `/api/inbox/${file.id}`;
+  const url = file.downloadUrl ?? `/api/inbox/${file.id}`;
+  const previewUrl = file.previewUrl ?? `/api/inbox/${file.id}?preview=1`;
   useEffect(() => {
     if (selected) viewer.current?.showModal();
     else viewer.current?.close();
@@ -59,10 +60,10 @@ export function InboxPreview({ file }: { file: Attachment }) {
         onClick={(e) => show(e.currentTarget)}
       >
         {file.previewType === 'image' ? (
-          <img src={url + '?preview=1'} loading="lazy" alt="" />
+          <img src={previewUrl} loading="lazy" alt="" />
         ) : file.previewType === 'video' ? (
           <video
-            src={url + '?preview=1#t=0.1'}
+            src={previewUrl + '#t=0.1'}
             muted
             playsInline
             preload="metadata"
@@ -137,7 +138,7 @@ export function InboxPreview({ file }: { file: Attachment }) {
               ) : file.previewType === 'video' ? (
                 <video
                   ref={video}
-                  src={url + '?preview=1'}
+                  src={previewUrl}
                   autoPlay
                   controls
                   playsInline
@@ -145,7 +146,7 @@ export function InboxPreview({ file }: { file: Attachment }) {
                 />
               ) : (
                 <img
-                  src={url + '?preview=1'}
+                  src={previewUrl}
                   alt={file.name}
                   onError={() => setFailed(true)}
                 />

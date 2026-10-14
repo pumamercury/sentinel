@@ -10,6 +10,7 @@ import {
   rmSync,
   truncateSync,
   readdirSync,
+  realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -284,7 +285,7 @@ test('batch cloud metadata skips offline files and detects hydration without siz
       availabilitySnapshot: async () =>
         new Map(
           readdirSync(source).map((name) => [
-            join(source, name).toLowerCase(),
+            realpathSync(join(source, name)).toLowerCase(),
             name === 'old-cloud.png' ? hydrated : name === 'ready.png',
           ]),
         ),

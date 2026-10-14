@@ -247,7 +247,60 @@ label {
   font-weight: 600;
 }
 .table-wrap {
-  overflow: auto;
+  overflow-x: auto;
+}
+.account-card {
+  width: min(560px, calc(100% - 40px));
+  margin: 64px auto;
+  padding: 28px;
+  border: 1px solid var(--glass-border);
+  border-radius: 20px;
+  background: #101014;
+}
+.auth-screen {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px 20px;
+}
+.auth-screen > .account-card {
+  width: min(560px, 100%);
+  margin: 0;
+}
+.account-card form {
+  display: grid;
+  gap: 16px;
+  margin: 24px 0;
+}
+.account-card h2 {
+  margin-top: 28px;
+}
+.account-card li {
+  margin: 14px 0;
+  overflow-wrap: anywhere;
+}
+.account-management {
+  width: min(800px, calc(100% - 40px));
+}
+.account-bar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 12px 28px;
+  border-bottom: 1px solid var(--glass-border);
+}
+.account-bar span {
+  margin-right: auto;
+  overflow-wrap: anywhere;
+}
+.account-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-right: auto;
+  min-width: 0;
 }
 table {
   border-collapse: collapse;
@@ -1725,90 +1778,6 @@ th.project-column {
   }
 }
 
-/* Floating issue search stays separate from the issue list. */
-.floating-search {
-  position: fixed;
-  top: 20px;
-  right: 24px;
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  width: 48px;
-  height: 48px;
-  border: 1px solid rgb(255 255 255 / 20%);
-  border-radius: 999px;
-  background:
-    linear-gradient(135deg, rgb(100 85 255 / 15%), transparent),
-    rgb(10 10 14 / 94%);
-  box-shadow:
-    0 8px 28px rgb(0 0 0 / 45%),
-    inset 0 1px 0 rgb(255 255 255 / 10%);
-  backdrop-filter: blur(24px);
-  overflow: hidden;
-  transition:
-    width 420ms cubic-bezier(0.22, 1, 0.36, 1),
-    border-color 180ms ease;
-}
-.floating-search.expanded {
-  width: min(480px, calc(100vw - 48px));
-}
-.floating-search:focus-within {
-  border-color: #776bff;
-}
-.floating-search .search-toggle,
-.floating-search .search-close {
-  flex: 0 0 46px;
-  height: 46px;
-  padding: 0;
-  justify-content: center;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  box-shadow: none;
-  color: #ededf2;
-}
-.floating-search input {
-  flex: 1;
-  min-width: 0;
-  width: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  outline: none;
-  font-size: 1rem;
-  opacity: 0;
-  transition: opacity 150ms ease;
-}
-.floating-search.expanded input {
-  opacity: 1;
-}
-.shell.has-search > main {
-  padding-top: 72px;
-}
-@media (max-width: 700px) {
-  .floating-search {
-    top: 12px;
-    right: 12px;
-  }
-  .floating-search.expanded {
-    width: calc(100vw - 24px);
-  }
-  .shell.has-search {
-    padding-top: 76px;
-  }
-  .shell.has-search > main {
-    padding-top: 0;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .floating-search,
-  .floating-search input {
-    transition: none;
-  }
-}
-
 .admin-sections,
 .project-type-filters {
   display: flex;
@@ -2327,7 +2296,6 @@ textarea {
   letter-spacing: -1px;
 }
 .table-wrap {
-  max-height: 72vh;
   isolation: isolate;
 }
 .table-wrap thead th {
@@ -2449,12 +2417,12 @@ td .issue-cell-link {
   width: 100%;
 }
 .inline-title-editor {
-  width: 100%;
+  width: min(100%, 56rem);
 }
 .inline-title-input {
   display: grid;
   width: 100%;
-  max-width: 40ch;
+  max-width: 100%;
   font-size: clamp(1.5rem, 2.4vw, 2.2rem);
   font-weight: 700;
   line-height: 1.35;
@@ -2489,7 +2457,13 @@ td .issue-cell-link {
   box-shadow: none;
 }
 .inline-title-editor .actions {
-  max-width: 100%;
+  justify-content: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+}
+.inline-title-editor .inline-title-input > textarea:focus-visible {
+  border-color: #776bff;
+  box-shadow: 0 0 0 3px rgb(119 107 255 / 15%);
 }
 @media (max-width: 700px) {
   .inline-title-input {
@@ -2908,9 +2882,17 @@ td .issue-cell-link {
     width: 100%;
   }
 }
-.issue-properties .project-property-group { margin-top: 0; padding-top: 0; border-top: 0; }
-.issue-properties .project-property-group .inline-project-value { padding: 8px 0; }
-.issue-properties .project-property-group .project-badge { vertical-align: middle; }
+.issue-properties .project-property-group {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.issue-properties .project-property-group .inline-project-value {
+  padding: 8px 0;
+}
+.issue-properties .project-property-group .project-badge {
+  vertical-align: middle;
+}
 .brand-robot {
   display: block;
   flex-shrink: 0;
@@ -2918,4 +2900,478 @@ td .issue-cell-link {
   height: 34px;
   filter: drop-shadow(0 0 5px rgb(185 175 255 / 50%))
     drop-shadow(0 0 14px rgb(121 104 255 / 40%));
+}
+
+/* Shared workspace navigation and search. */
+.workspace-topbar {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto;
+  gap: 24px;
+  align-items: center;
+  padding: 16px 28px;
+  background: #08080b;
+}
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #ededf2;
+  font-weight: 750;
+  font-size: 1.1rem;
+  text-decoration: none;
+}
+.topbar-search-slot {
+  min-width: 0;
+  width: 100%;
+  max-width: 560px;
+}
+.topbar-account-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+.topbar-account-controls .account-identity {
+  margin: 0 6px 0 0;
+  font-size: 0.8rem;
+}
+.topbar-account-controls .account-identity > span {
+  max-width: 230px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-search {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 44px;
+  border: 1px solid #34343e;
+  border-radius: 12px;
+  background: #141419;
+}
+.workspace-search:focus-within {
+  border-color: #776bff;
+  box-shadow: 0 0 0 3px rgb(119 107 255 / 12%);
+}
+.workspace-search input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+  font-size: 0.875rem;
+}
+.workspace-search .search-toggle,
+.workspace-search .search-close {
+  flex: 0 0 42px;
+  padding: 0;
+  height: 42px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #aaaabb;
+}
+.photos-connection {
+  margin-bottom: 24px;
+}
+.photos-connection-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+.photos-connection-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+.photos-connection-header output {
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+.photos-connection-header p {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+}
+.photos-connection-header .actions {
+  flex-shrink: 0;
+}
+.photos-connection-settings {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #303039;
+}
+@media (max-width: 1100px) {
+  .workspace-topbar {
+    grid-template-columns: auto 1fr;
+    gap: 12px 20px;
+  }
+  .topbar-search-slot {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    max-width: none;
+  }
+  .topbar-account-controls {
+    grid-row: 1;
+    grid-column: 2;
+  }
+}
+
+/* Keep the workspace focused on reports, with the page doing the scrolling. */
+.shell > main {
+  padding-top: 22px;
+}
+.shell > aside {
+  padding-top: 28px;
+}
+.shell > main > .breadcrumb {
+  border: 0;
+  padding-bottom: 0;
+  margin-bottom: 18px;
+}
+.shell > main > header {
+  margin-bottom: 20px;
+}
+.shell > main > header .eyebrow {
+  margin-bottom: 8px;
+}
+.shell > main > header h1 {
+  font-size: 1.75rem;
+  margin-bottom: 4px;
+}
+.shell .issues-heading {
+  align-items: center;
+}
+.shell .stats {
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.shell .stats > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: #101014;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.shell .stats strong {
+  margin: 0;
+  font-size: 1.35rem;
+}
+.shell .stats span {
+  font-size: 0.8rem;
+}
+.shell .toolbar {
+  padding: 12px 16px;
+}
+.report-draft-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #3a354f;
+  border-radius: 12px;
+  background: #14121d;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  font-size: 0.85rem;
+}
+.report-draft-banner span {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.report-draft-banner button {
+  flex-shrink: 0;
+}
+dialog.quick-report-modal {
+  width: min(720px, calc(100vw - 32px));
+  padding: 24px;
+  background: #101014;
+}
+.quick-report-modal .modal-head {
+  margin-bottom: 20px;
+}
+.quick-report-modal .modal-head .eyebrow {
+  margin-bottom: 6px;
+}
+.quick-report-modal .modal-head .muted {
+  margin-top: 6px;
+}
+.quick-report-fields {
+  display: grid;
+  gap: 16px;
+}
+.quick-report-fields .project-picker {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px 12px;
+}
+.quick-report-fields .project-picker label {
+  grid-column: 1 / -1;
+}
+.quick-report-fields .project-picker select {
+  width: 100%;
+}
+.quick-report-fields .project-picker input,
+.quick-report-fields .project-picker p {
+  grid-column: 1 / -1;
+}
+.quick-report-fields .project-picker .project-badge {
+  margin: 0;
+}
+.quick-report-fields .project-picker .project-avatar {
+  height: 30px;
+  width: 30px;
+}
+.quick-report-fields label {
+  position: relative;
+}
+.optional-label {
+  position: absolute;
+  top: 0;
+  right: 0;
+  color: #9292a4;
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+.quick-report-fields textarea {
+  min-height: 88px;
+}
+.quick-report-help {
+  margin-bottom: 20px;
+}
+.report-evidence {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px dashed #444451;
+  border-radius: 12px;
+  background: #15151c;
+  padding: 16px;
+}
+.report-evidence strong {
+  font-size: 0.875rem;
+}
+.report-evidence .muted {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+}
+.report-evidence button {
+  flex-shrink: 0;
+}
+.report-evidence input[hidden] {
+  display: none;
+}
+.quick-report-modal .attachment-staging {
+  margin-top: 18px;
+  padding-top: 0;
+  border-top: 0;
+}
+.quick-report-modal .attachment-staging > .muted {
+  font-size: 0.75rem;
+  margin: 6px 0 0;
+}
+.quick-report-modal .attachment-list:empty {
+  display: none;
+}
+.report-extra-details {
+  margin-top: 16px;
+  border-top: 1px solid #303039;
+}
+.details-toggle {
+  display: flex;
+  width: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  padding: 14px 0;
+  color: #d3ccff;
+}
+.details-toggle span {
+  margin-left: auto;
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: #a5a5b8;
+}
+.report-extra-details .form-grid {
+  padding: 8px 0 20px;
+}
+.report-form-footer {
+  position: sticky;
+  bottom: -24px;
+  z-index: 3;
+  background: #101014;
+  box-shadow: 0 -10px 20px #101014;
+  border-top: 1px solid #303039;
+  margin-top: 10px;
+  padding: 12px 0 8px;
+}
+.report-form-footer .actions {
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.draft-save-status {
+  display: block;
+  color: #a4b7ac;
+  font-size: 0.75rem;
+}
+.report-form-footer .draft-discard {
+  margin-right: auto;
+  background: none;
+  box-shadow: none;
+  border-color: transparent;
+  color: #aaaabb;
+}
+@media (max-width: 700px) {
+  .shell > aside {
+    padding-top: 12px;
+  }
+  .shell > main {
+    padding-top: 8px;
+  }
+  .shell .stats > div {
+    padding: 10px 12px;
+  }
+  .shell > main > header h1 {
+    font-size: 1.5rem;
+  }
+  .report-draft-banner {
+    align-items: flex-start;
+  }
+}
+@media (max-width: 480px) {
+  dialog.quick-report-modal {
+    padding: 18px;
+  }
+  .quick-report-fields .project-picker {
+    grid-template-columns: 1fr;
+  }
+  .quick-report-fields .project-picker .project-badge {
+    display: none;
+  }
+  .report-evidence {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .details-toggle span {
+    width: 100%;
+    margin-left: 24px;
+  }
+  .report-form-footer .actions {
+    gap: 6px;
+  }
+  .report-form-footer .actions button {
+    padding: 9px 10px;
+  }
+}
+@media (max-width: 600px) {
+  .workspace-topbar {
+    padding: 12px 16px;
+    gap: 12px;
+  }
+  .topbar-account-controls {
+    flex-wrap: wrap;
+  }
+  .topbar-account-controls .account-identity {
+    flex-basis: 100%;
+    align-items: flex-end;
+    margin: 0;
+  }
+  .topbar-account-controls .account-identity > span {
+    max-width: min(180px, 100%);
+  }
+  .photos-connection-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .photos-connection-header .actions {
+    flex-wrap: wrap;
+  }
+}
+
+.trash-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px 0;
+  border-bottom: 1px solid #ffffff18;
+}
+.trash-item > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.trash-item button {
+  flex-shrink: 0;
+}
+@media (max-width: 600px) {
+  .trash-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+.inline-choice-container {
+  min-width: 0;
+}
+.inline-choice {
+  position: relative;
+  cursor: pointer;
+}
+.inline-choice > select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.inline-choice:focus-within {
+  background: #ffffff08;
+  border-color: #ffffff24;
+  outline: 2px solid #9581ff;
+  outline-offset: 2px;
+}
+.inline-choice:focus-within .inline-edit-cue {
+  opacity: 1;
+}
+.inline-choice[aria-busy='true'] {
+  opacity: 0.65;
+}
+.inline-choice-container > .error {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+}
+
+.project-export {
+  margin-bottom: 20px;
+}
+.project-export summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.project-export summary svg {
+  display: inline;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+.project-export .form-grid {
+  margin: 16px 0;
 }

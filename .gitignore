@@ -45,6 +45,7 @@ next-env.d.ts
 /.codex/
 /.agents/
 /.pnpm-store/
+/.macos/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
@@ -54,3 +55,7 @@ next-env.d.ts
 *.gitbundle
 Thumbs.db
 Desktop.ini
+
+# Private hosting migration exports and static Pages output
+/migration-private/
+/dist-pages/

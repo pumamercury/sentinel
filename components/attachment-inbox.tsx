@@ -1,4 +1,6 @@
 'use client';
+import { cloudEnabled } from '../lib/cloud';
+import { useAccess } from './account-gate';
 import { useEffect, useState } from 'react';
 import {
   Inbox,
@@ -18,8 +20,9 @@ import {
   type Issue,
   type Project,
 } from '../lib/bugs';
-import { issueLabel } from './issue-identity';
+import { IssueSearchPicker } from './issue-search-picker';
 import { InboxPreview } from './inbox-preview';
+import { PhotosInboxSettings, type PhotosState } from './photos-inbox-settings';
 export type Capture = Attachment & {
   sourcePath: string;
   sourceModified: string;
@@ -31,6 +34,7 @@ type CaptureSettings = {
   nameContains: string;
 };
 type State = {
+  photos: PhotosState;
   settings: CaptureSettings;
   lastScan: string | null;
   error: string;
@@ -54,6 +58,7 @@ export function AttachmentInbox({
   onNew: (captures: Capture[], project?: string) => void;
   onRefresh: () => Promise<void>;
 }) {
+  const { owner } = useAccess();
   const [data, setData] = useState<State | null>(null),
     [draft, setDraft] = useState<CaptureSettings | null>(null);
   const [error, setError] = useState(''),
@@ -63,6 +68,15 @@ export function AttachmentInbox({
     [issueId, setIssueId] = useState(''),
     [project, setProject] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const availableIssues = issues.filter(
+    (issue) => !project || issue.project === project,
+  );
+  const selectedIssueId = availableIssues.some(
+    (issue) => String(issue.id) === issueId,
+  )
+    ? issueId
+    : '';
+  if (issueId && !selectedIssueId) setIssueId('');
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
@@ -102,6 +116,43 @@ export function AttachmentInbox({
     }
   }
   const chosen = data?.files.filter((f) => selected.includes(f.id)) ?? [];
+  async function deleteSelected() {
+    const captures = [...chosen];
+    if (
+      busy ||
+      !captures.length ||
+      !confirm(
+        `Delete ${captures.length} selected ${captures.length === 1 ? 'capture' : 'captures'} from Sentinel’s inbox? This cannot be undone. Originals in Photos or source folders will not be deleted.`,
+      )
+    )
+      return;
+    await run(async () => {
+      let deleted = 0;
+      for (const capture of captures) {
+        try {
+          await api('inbox/' + capture.id, 'DELETE');
+        } catch (error) {
+          throw Error(
+            `Deleted ${deleted} of ${captures.length} captures. ${(error as Error).message} Any remaining captures are still selected; you can retry.`,
+          );
+        }
+        deleted++;
+        setSelected((ids) => ids.filter((id) => id !== capture.id));
+        setData(
+          (current) =>
+            current && {
+              ...current,
+              files: current.files.filter((file) => file.id !== capture.id),
+            },
+        );
+      }
+      setNotice(
+        `${deleted} ${deleted === 1 ? 'capture deleted' : 'captures deleted'} from the inbox.`,
+      );
+    });
+  }
+  const showFolderMonitoring =
+    !cloudEnabled && owner && !!data && !data.photos?.supported;
   return (
     <>
       <div className="breadcrumb">Workspace / Attachment Inbox</div>
@@ -116,10 +167,12 @@ export function AttachmentInbox({
             Collect first. Turn your evidence into issues when you’re ready.
           </p>
         </div>
-        <button onClick={() => setSettingsOpen(!settingsOpen)}>
-          <FolderOpen size={18} />
-          {settingsOpen ? 'Hide setup' : 'Folder settings'}
-        </button>
+        {showFolderMonitoring && (
+          <button onClick={() => setSettingsOpen(!settingsOpen)}>
+            <FolderOpen size={18} />
+            {settingsOpen ? 'Hide setup' : 'Folder settings'}
+          </button>
+        )}
       </header>
       {error && (
         <p className="error" role="alert">
@@ -135,76 +188,99 @@ export function AttachmentInbox({
         <p role="status">Loading capture inbox…</p>
       ) : (
         <>
-          <section className="surface inbox-agent-status">
-            <div>
-              <span
-                className={
-                  'capture-dot ' + (data.settings.enabled ? 'enabled' : '')
-                }
-              />
-              <strong>
-                {data.settings.enabled
-                  ? 'Monitoring enabled'
-                  : 'Monitoring paused'}
-              </strong>
-              <p className="muted">
-                {data.settings.folder ||
-                  'Choose your iCloud Photos folder to begin.'}
+          {cloudEnabled && (
+            <section className="detail-panel">
+              <h2>Apple Photos on your Mac</h2>
+              <p>
+                New captures arrive here while Sentinel’s Mac companion is
+                running. Manage Photos access and collection settings on your
+                Mac.
               </p>
-              <small>
-                {data.importing
-                  ? 'Importing ' + data.importing
-                  : data.running
-                    ? 'Checking for new captures…'
-                    : data.lastScan
-                      ? 'Last checked ' + date(data.lastScan)
-                      : 'Waiting for the first scan.'}
-              </small>
-            </div>
-            <div className="actions">
-              <button
-                disabled={busy || !data.settings.folder}
-                onClick={() =>
-                  run(async () => {
-                    const next = {
-                      ...data.settings,
-                      enabled: !data.settings.enabled,
-                    };
-                    const result = await api<State>(
-                      'inbox/settings',
-                      'PUT',
-                      next,
-                    );
-                    setDraft(result.settings);
-                  })
-                }
-              >
-                {data.settings.enabled ? (
-                  <Pause size={16} />
-                ) : (
-                  <Play size={16} />
-                )}{' '}
-                {data.settings.enabled ? 'Pause' : 'Resume'}
-              </button>
-              <button
-                disabled={busy || !data.settings.enabled}
-                onClick={() =>
-                  run(async () => {
-                    await api('inbox/scan', 'POST', {});
-                  })
-                }
-              >
-                <RefreshCw size={16} />
-                Check now
-              </button>
-            </div>
-          </section>
+            </section>
+          )}
+          {!cloudEnabled && owner && data.photos && (
+            <PhotosInboxSettings
+              data={data.photos}
+              busy={busy}
+              save={(settings) => {
+                void run(async () => {
+                  await api('inbox/photos', 'PUT', settings);
+                });
+              }}
+            />
+          )}
+          {showFolderMonitoring && (
+            <section className="surface inbox-agent-status">
+              <div>
+                <span
+                  className={
+                    'capture-dot ' + (data.settings.enabled ? 'enabled' : '')
+                  }
+                />
+                <strong>
+                  {data.settings.enabled
+                    ? 'Folder monitoring enabled'
+                    : 'Folder monitoring paused'}
+                </strong>
+                <p className="muted">
+                  {data.settings.folder ||
+                    'Choose a local folder, or connect Apple Photos above.'}
+                </p>
+                <small>
+                  {data.importing
+                    ? 'Importing ' + data.importing
+                    : data.running
+                      ? 'Checking for new captures…'
+                      : data.lastScan
+                        ? 'Last checked ' + date(data.lastScan)
+                        : 'Waiting for the first scan.'}
+                </small>
+              </div>
+              <div className="actions">
+                <button
+                  disabled={busy || !data.settings.folder}
+                  onClick={() =>
+                    run(async () => {
+                      const next = {
+                        ...data.settings,
+                        enabled: !data.settings.enabled,
+                      };
+                      const result = await api<State>(
+                        'inbox/settings',
+                        'PUT',
+                        next,
+                      );
+                      setDraft(result.settings);
+                    })
+                  }
+                >
+                  {data.settings.enabled ? (
+                    <Pause size={16} />
+                  ) : (
+                    <Play size={16} />
+                  )}{' '}
+                  {data.settings.enabled ? 'Pause' : 'Resume'}
+                </button>
+                <button
+                  disabled={busy || !data.settings.enabled}
+                  onClick={() =>
+                    run(async () => {
+                      await api('inbox/scan', 'POST', {});
+                    })
+                  }
+                >
+                  <RefreshCw size={16} />
+                  Check now
+                </button>
+              </div>
+            </section>
+          )}
           {data.error && (
             <p role="alert" className="error">
               {data.error}
             </p>
           )}
-          {(settingsOpen || !data.settings.folder) && (
+          {showFolderMonitoring && (settingsOpen || !data.settings.folder) && (
             <form
               className="detail-panel inbox-settings"
               onSubmit={(e) => {
@@ -302,7 +378,7 @@ export function AttachmentInbox({
               </button>
             </form>
           )}
-          {!!data.problems.length && (
+          {showFolderMonitoring && !!data.problems.length && (
             <details className="inbox-problems">
               <summary>
                 {(data.counts.waiting ?? 0) +
@@ -348,29 +424,20 @@ export function AttachmentInbox({
               <Plus size={16} />
               New issue with captures
             </button>
-            <select
-              aria-label="Existing issue for captures"
-              value={issueId}
-              onChange={(e) => setIssueId(e.target.value)}
-            >
-              <option value="" disabled>
-                Choose existing issue…
-              </option>
-              {issues
-                .filter((i) => !project || i.project === project)
-                .map((i) => (
-                  <option key={i.id} value={i.id}>
-                    {issueLabel(i.id, i.issueType)} · {i.title}
-                  </option>
-                ))}
-            </select>
+            <IssueSearchPicker
+              key={project}
+              issues={availableIssues}
+              value={selectedIssueId}
+              onChange={setIssueId}
+              disabled={busy}
+            />
             <button
-              disabled={busy || !selected.length || !issueId}
+              disabled={busy || !chosen.length || !selectedIssueId}
               onClick={() =>
                 run(async () => {
                   await api('inbox/assign', 'POST', {
                     ids: selected,
-                    issueId: Number(issueId),
+                    issueId: Number(selectedIssueId),
                   });
                   await onRefresh();
                   setSelected([]);
@@ -386,6 +453,15 @@ export function AttachmentInbox({
                 Clear selection
               </button>
             )}
+            <button
+              type="button"
+              className="danger"
+              disabled={busy || !chosen.length}
+              onClick={() => void deleteSelected()}
+            >
+              <Trash2 size={16} />
+              Delete selected{chosen.length ? ` (${chosen.length})` : ''}
+            </button>
           </div>
           {!data.files.length ? (
             <section className="empty">
@@ -436,7 +512,7 @@ export function AttachmentInbox({
                     <div className="attachment-controls">
                       <a
                         className="button"
-                        href={'/api/inbox/' + file.id}
+                        href={file.downloadUrl ?? '/api/inbox/' + file.id}
                         download={file.name}
                         aria-label={`Download ${file.name}`}
                       >
@@ -468,9 +544,15 @@ export function AttachmentInbox({
             </ul>
           )}
           <p className="muted inbox-footnote">
-            Up to 250 MB per file · Select up to 20 captures ·{' '}
-            {data.counts.ignored ?? 0} existing files skipped ·{' '}
-            {data.counts.duplicate ?? 0} duplicates skipped
+            Up to {cloudEnabled ? '50' : '250'} MB per file · Select up to 20
+            captures
+            {showFolderMonitoring && (
+              <>
+                {' '}
+                · {data.counts.ignored ?? 0} existing files skipped ·{' '}
+                {data.counts.duplicate ?? 0} duplicates skipped
+              </>
+            )}
           </p>
         </>
       )}

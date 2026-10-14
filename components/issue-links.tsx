@@ -105,6 +105,7 @@ export function IssueLinks({
                   <IssueIdentity
                     id={link.issue.id}
                     type={link.issue.issueType}
+                    issueKey={link.issue.issueKey}
                   />
                   <span>{link.issue.project}</span>
                 </span>
@@ -175,7 +176,11 @@ export function IssueLinks({
               >
                 <span className="related-report">
                   <span className="related-meta">
-                    <IssueIdentity id={i.id} type={i.issueType} />
+                    <IssueIdentity
+                      id={i.id}
+                      type={i.issueType}
+                      issueKey={i.issueKey}
+                    />
                     <span>{i.project}</span>
                   </span>
                   <span className="related-title">{i.title}</span>

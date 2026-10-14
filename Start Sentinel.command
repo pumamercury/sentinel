@@ -8,6 +8,12 @@ if ! command -v node >/dev/null 2>&1 && [[ -s "$HOME/.nvm/nvm.sh" ]]; then
   nvm use 24 >/dev/null 2>&1
 fi
 if ! command -v node >/dev/null 2>&1; then
+  codex_node_bin="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin"
+  if [[ -x "$codex_node_bin/node" ]]; then
+    export PATH="$codex_node_bin:$PATH"
+  fi
+fi
+if ! command -v node >/dev/null 2>&1; then
   print 'Install Node.js 24, then follow docs/MACOS.md.'
   read -r '?Press Return to close.'
   exit 1
