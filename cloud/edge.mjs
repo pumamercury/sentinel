@@ -79,16 +79,28 @@ async function mutate(work) {
   }
   fail('Workspace is busy. Please retry.', 409);
 }
-async function signed(file) {
-  const preview = checked(await bucket.createSignedUrl(file.path, 900));
-  const download = checked(
-    await bucket.createSignedUrl(file.path, 900, { download: file.name }),
+async function signedFiles(files) {
+  if (!files.length) return [];
+  const urls = checked(
+    await bucket.createSignedUrls(
+      files.map((file) => file.path),
+      900,
+    ),
   );
-  return {
-    ...file,
-    previewUrl: preview.signedUrl,
-    downloadUrl: download.signedUrl,
-  };
+  const byPath = new Map(urls.map((entry) => [entry.path, entry]));
+  return files.map((file) => {
+    const entry = byPath.get(file.path);
+    if (!entry?.signedUrl)
+      throw Error(
+        entry?.error || 'Attachment link unavailable. Please refresh.',
+      );
+    const download = new URL(entry.signedUrl);
+    download.searchParams.set('download', file.name);
+    return { ...file, previewUrl: entry.signedUrl, downloadUrl: download.href };
+  });
+}
+async function signed(file) {
+  return (await signedFiles([file]))[0];
 }
 async function migration(req, path, body) {
   const config = checked(
@@ -692,7 +704,7 @@ Deno.serve(async (req) => {
           'This workspace is too large for a browser JSON backup. Use database and Storage backups in Supabase.',
           413,
         );
-      const files = await Promise.all(state.files.map(signed));
+      const files = await signedFiles(state.files);
       return response({
         schemaVersion: 2,
         exportedAt: new Date().toISOString(),
@@ -768,9 +780,9 @@ Deno.serve(async (req) => {
         console.error('Attachment cleanup failed:', removed.error.message);
     }
     if (path === 'inbox' && req.method === 'GET')
-      result.files = await Promise.all(result.files.map(signed));
+      result.files = await signedFiles(result.files);
     if (/^bugs\/\d+\/attachments$/.test(path) && req.method === 'GET')
-      result = await Promise.all(result.map(signed));
+      result = await signedFiles(result);
     if (result?.csv !== undefined)
       return new Response(result.csv, {
         headers: { ...headers, 'Content-Type': 'text/csv; charset=utf-8' },

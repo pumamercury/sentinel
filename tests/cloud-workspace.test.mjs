@@ -158,3 +158,19 @@ test('migration keeps stable IDs and numbering reservations for deleted issues',
   assert.equal(act(s, 'bugs', 'POST', draft).issueKey, 'FT-BUG-13');
   assert.equal(s.bugs[1].id, 13);
 });
+test('inbox deletion is retry-safe and retains the capture deduplication ledger', () => {
+  const s = emptyWorkspace();
+  s.captureHashes = ['already-imported'];
+  s.files = [
+    {
+      id: 'capture-retry',
+      source: 'inbox',
+      pending: false,
+      captureHash: 'already-imported',
+    },
+  ];
+  assert.deepEqual(act(s, 'inbox/capture-retry', 'DELETE'), { deleted: true });
+  assert.deepEqual(act(s, 'inbox/capture-retry', 'DELETE'), { deleted: true });
+  assert.equal(s.files.length, 0);
+  assert.deepEqual(s.captureHashes, ['already-imported']);
+});

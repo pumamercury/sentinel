@@ -1,7 +1,7 @@
 'use client';
 import { cloudEnabled } from '../lib/cloud';
 import { useAccess } from './account-gate';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Inbox,
   RefreshCw,
@@ -67,6 +67,8 @@ export function AttachmentInbox({
   const [selected, setSelected] = useState<string[]>([]),
     [issueId, setIssueId] = useState(''),
     [project, setProject] = useState('');
+  const mutationVersion = useRef(0);
+  const mutationBusy = useRef(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const availableIssues = issues.filter(
     (issue) => !project || issue.project === project,
@@ -82,8 +84,14 @@ export function AttachmentInbox({
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
       try {
+        if (mutationBusy.current) return;
+        const version = mutationVersion.current;
         const result = await api<State>('inbox');
-        if (alive) {
+        if (
+          alive &&
+          !mutationBusy.current &&
+          version === mutationVersion.current
+        ) {
           setData(result);
           setDraft((d) => d ?? result.settings);
           setSelected((ids) =>
@@ -93,7 +101,7 @@ export function AttachmentInbox({
       } catch (e) {
         if (alive) setError((e as Error).message);
       } finally {
-        if (alive) timer = setTimeout(refresh, 5000);
+        if (alive) timer = setTimeout(refresh, cloudEnabled ? 30000 : 5000);
       }
     }
     void refresh();
@@ -103,6 +111,8 @@ export function AttachmentInbox({
     };
   }, []);
   async function run(work: () => Promise<void>) {
+    mutationBusy.current = true;
+    mutationVersion.current++;
     setBusy(true);
     setError('');
     setNotice('');
@@ -112,6 +122,7 @@ export function AttachmentInbox({
     } catch (e) {
       setError((e as Error).message);
     } finally {
+      mutationBusy.current = false;
       setBusy(false);
     }
   }
@@ -529,6 +540,15 @@ export function AttachmentInbox({
                           )
                             run(async () => {
                               await api('inbox/' + file.id, 'DELETE');
+                              setData(
+                                (current) =>
+                                  current && {
+                                    ...current,
+                                    files: current.files.filter(
+                                      (capture) => capture.id !== file.id,
+                                    ),
+                                  },
+                              );
                               setSelected((ids) =>
                                 ids.filter((id) => id !== file.id),
                               );

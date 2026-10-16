@@ -667,10 +667,10 @@ export function workspaceRequest(
   }
   const im = path.match(/^inbox\/([a-zA-Z0-9-]+)$/);
   if (im && method === 'DELETE') {
-    const file =
-      state.files.find(
-        (f) => f.id === im[1] && f.source === 'inbox' && !f.pending,
-      ) ?? reject('Capture not found.', 404);
+    const file = state.files.find(
+      (f) => f.id === im[1] && f.source === 'inbox' && !f.pending,
+    );
+    if (!file) return { deleted: true };
     state.files = state.files.filter((f) => f !== file);
     return { deleted: true };
   }
