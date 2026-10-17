@@ -84,6 +84,7 @@ export type Project = {
   image: string;
 };
 export type Attachment = {
+  unavailable?: boolean;
   downloadUrl?: string;
   previewUrl?: string;
   previewType: 'image' | 'video' | null;

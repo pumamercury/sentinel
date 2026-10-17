@@ -91,9 +91,13 @@ async function signedFiles(files) {
   return files.map((file) => {
     const entry = byPath.get(file.path);
     if (!entry?.signedUrl)
-      throw Error(
-        entry?.error || 'Attachment link unavailable. Please refresh.',
-      );
+      return {
+        ...file,
+        previewType: null,
+        previewUrl: undefined,
+        downloadUrl: undefined,
+        unavailable: true,
+      };
     const download = new URL(entry.signedUrl);
     download.searchParams.set('download', file.name);
     return { ...file, previewUrl: entry.signedUrl, downloadUrl: download.href };

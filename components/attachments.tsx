@@ -204,17 +204,23 @@ export function Attachments({
                   {f.size >= 1_000_000
                     ? (f.size / 1_000_000).toFixed(1) + ' MB'
                     : (f.size / 1000).toFixed(1) + ' KB'}
-                  {!f.previewType ? ' · Download to open' : ''}
+                  {f.unavailable
+                    ? ' · File missing from storage'
+                    : !f.previewType
+                      ? ' · Download to open'
+                      : ''}
                 </small>
                 <div className="attachment-controls">
-                  <a
-                    className="button"
-                    aria-label={'Download ' + f.name}
-                    href={url(f)}
-                    download={f.name}
-                  >
-                    <Download size={16} />
-                  </a>
+                  {!f.unavailable && (
+                    <a
+                      className="button"
+                      aria-label={'Download ' + f.name}
+                      href={url(f)}
+                      download={f.name}
+                    >
+                      <Download size={16} />
+                    </a>
+                  )}
                   <button
                     type="button"
                     disabled={busy}

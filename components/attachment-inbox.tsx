@@ -519,16 +519,19 @@ export function AttachmentInbox({
                     <small>
                       {(file.size / 1_000_000).toFixed(1)} MB · Imported{' '}
                       {date(file.createdAt)}
+                      {file.unavailable && ' · File missing from storage'}
                     </small>
                     <div className="attachment-controls">
-                      <a
-                        className="button"
-                        href={file.downloadUrl ?? '/api/inbox/' + file.id}
-                        download={file.name}
-                        aria-label={`Download ${file.name}`}
-                      >
-                        <Download size={16} />
-                      </a>
+                      {!file.unavailable && (
+                        <a
+                          className="button"
+                          href={file.downloadUrl ?? '/api/inbox/' + file.id}
+                          download={file.name}
+                          aria-label={`Download ${file.name}`}
+                        >
+                          <Download size={16} />
+                        </a>
+                      )}
                       <button
                         disabled={busy}
                         aria-label={`Discard ${file.name}`}
