@@ -38,8 +38,15 @@ export function authSchema(db) {
     CREATE TABLE IF NOT EXISTS auth_limits(key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS auth_resets(hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS auth_config(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
-  if (!db.prepare("PRAGMA table_info(auth_sessions)").all().some((column) => column.name === "remembered"))
-    db.exec("ALTER TABLE auth_sessions ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0");
+  if (
+    !db
+      .prepare('PRAGMA table_info(auth_sessions)')
+      .all()
+      .some((column) => column.name === 'remembered')
+  )
+    db.exec(
+      'ALTER TABLE auth_sessions ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0',
+    );
 }
 export function recoveryLinkToken(db, address) {
   authSchema(db);
@@ -140,12 +147,9 @@ export function authentication(db, options = {}) {
       digest(sessionToken(req)),
     );
     const value = token();
-    db.prepare('INSERT INTO auth_sessions(hash,user_id,expires,remembered) VALUES(?,?,?,?)').run(
-      digest(value),
-      u.id,
-      Date.now() + age,
-      remember ? 1 : 0,
-    );
+    db.prepare(
+      'INSERT INTO auth_sessions(hash,user_id,expires,remembered) VALUES(?,?,?,?)',
+    ).run(digest(value), u.id, Date.now() + age, remember ? 1 : 0);
     res.setHeader('Set-Cookie', cookie(value, age / 1000));
   }
   function limit(key) {
@@ -198,12 +202,24 @@ export function authentication(db, options = {}) {
     if (url.pathname === '/api/auth/session' && req.method === 'GET') {
       if (u) {
         const value = sessionToken(req);
-        const saved = db.prepare('SELECT remembered,expires FROM auth_sessions WHERE hash=?').get(digest(value));
+        const saved = db
+          .prepare('SELECT remembered,expires FROM auth_sessions WHERE hash=?')
+          .get(digest(value));
         // Renew active remembered sessions at most once a day. Expired and
         // revoked sessions never reach this branch because user() rejects them.
-        if (saved?.remembered && saved.expires < Date.now() + rememberedSessionAge - 24 * 60 * 60 * 1000) {
-          db.prepare('UPDATE auth_sessions SET expires=? WHERE hash=?').run(Date.now() + rememberedSessionAge, digest(value));
-          res.setHeader('Set-Cookie', cookie(value, rememberedSessionAge / 1000));
+        if (
+          saved?.remembered &&
+          saved.expires <
+            Date.now() + rememberedSessionAge - 24 * 60 * 60 * 1000
+        ) {
+          db.prepare('UPDATE auth_sessions SET expires=? WHERE hash=?').run(
+            Date.now() + rememberedSessionAge,
+            digest(value),
+          );
+          res.setHeader(
+            'Set-Cookie',
+            cookie(value, rememberedSessionAge / 1000),
+          );
         }
       }
       send(200, { enabled: active, user: publicUser(u) });
@@ -442,6 +458,34 @@ export function authentication(db, options = {}) {
         if (!target) throw Error('Member not found.');
         const value = recoveryLinkToken(db, target.email);
         send(200, { url: expectedOrigin + '/#invite=' + value });
+        return true;
+      }
+      if (member && req.method === 'DELETE') {
+        const target = db
+          .prepare('SELECT * FROM auth_users WHERE id=?')
+          .get(Number(member[1]));
+        if (!target) {
+          send(200, { removed: true });
+          return true;
+        }
+        if (target.role === 'owner')
+          throw Error('Owner accounts cannot be removed.');
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          db.prepare('DELETE FROM auth_sessions WHERE user_id=?').run(
+            target.id,
+          );
+          db.prepare('DELETE FROM auth_resets WHERE user_id=?').run(target.id);
+          db.prepare('DELETE FROM auth_invites WHERE email=?').run(
+            target.email,
+          );
+          db.prepare('DELETE FROM auth_users WHERE id=?').run(target.id);
+          db.exec('COMMIT');
+        } catch (error) {
+          db.exec('ROLLBACK');
+          throw error;
+        }
+        send(200, { removed: true });
         return true;
       }
       if (member && req.method === 'PATCH') {

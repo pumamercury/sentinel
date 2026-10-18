@@ -257,6 +257,7 @@ function AccountSettings({ owner }: { owner: boolean }) {
     [password, setPassword] = useState('');
   const [message, setMessage] = useState(''),
     [busy, setBusy] = useState(false);
+  const [removeMember, setRemoveMember] = useState<User | null>(null);
   async function refresh() {
     if (owner) {
       const data = await request<{
@@ -373,9 +374,49 @@ function AccountSettings({ owner }: { owner: boolean }) {
           </form>
           {link && (
             <label>
-              Share this private link with the invitee. It expires in 48 hours.
+              Share this private link with the invitee promptly. Creating a new
+              link replaces the previous invitation.
               <input readOnly value={link} onFocus={(e) => e.target.select()} />
             </label>
+          )}
+          <p className="muted">
+            For an expired or failed invitation, enter the same email again to
+            create a fresh link.
+          </p>
+          {removeMember && (
+            <section
+              className="detail-panel"
+              role="alertdialog"
+              aria-label="Remove member"
+              aria-describedby="remove-member-description"
+            >
+              <h3>Remove {removeMember.email}?</h3>
+              <p id="remove-member-description">
+                This removes their account, access and invitation links. Their
+                issues, comments and attachments stay in the workspace. You can
+                invite this email again afterward.
+              </p>
+              <div className="actions">
+                <button disabled={busy} onClick={() => setRemoveMember(null)}>
+                  Cancel
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    void run(async () => {
+                      await request('users/' + removeMember.id, 'DELETE');
+                      setRemoveMember(null);
+                      setLink('');
+                      setMessage(
+                        'Member removed. You can now create a new invitation.',
+                      );
+                    })
+                  }
+                >
+                  Confirm removal
+                </button>
+              </div>
+            </section>
           )}
           <h2>Members</h2>
           <ul>
@@ -384,18 +425,23 @@ function AccountSettings({ owner }: { owner: boolean }) {
                 {u.email} · {u.role}
                 {u.disabled ? ' · disabled' : ''}{' '}
                 {u.role !== 'owner' && (
-                  <button
-                    disabled={busy}
-                    onClick={() =>
-                      void run(async () => {
-                        await request('users/' + u.id, 'PATCH', {
-                          disabled: !u.disabled,
-                        });
-                      })
-                    }
-                  >
-                    {u.disabled ? 'Restore access' : 'Disable access'}
-                  </button>
+                  <>
+                    <button
+                      disabled={busy}
+                      onClick={() =>
+                        void run(async () => {
+                          await request('users/' + u.id, 'PATCH', {
+                            disabled: !u.disabled,
+                          });
+                        })
+                      }
+                    >
+                      {u.disabled ? 'Restore access' : 'Disable access'}
+                    </button>
+                    <button disabled={busy} onClick={() => setRemoveMember(u)}>
+                      Remove member
+                    </button>
+                  </>
                 )}
               </li>
             ))}
@@ -407,6 +453,24 @@ function AccountSettings({ owner }: { owner: boolean }) {
                 {invitations.map((i) => (
                   <li key={i.id}>
                     {i.email}{' '}
+                    <button
+                      disabled={busy}
+                      onClick={() =>
+                        void run(async () => {
+                          const result = await request<{ url: string }>(
+                            'invite',
+                            'POST',
+                            { email: i.email },
+                          );
+                          setLink(result.url);
+                          setMessage(
+                            'New invitation link created. The old link is no longer valid.',
+                          );
+                        })
+                      }
+                    >
+                      Create new link
+                    </button>
                     <button
                       disabled={busy}
                       onClick={() =>

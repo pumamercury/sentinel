@@ -420,16 +420,24 @@ Deno.serve(async (req) => {
         typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254)
         fail('Enter a valid email.');
-      if (
-        checked(
-          await admin
-            .from('sentinel_members')
-            .select('id')
-            .eq('email', email)
-            .maybeSingle(),
-        )
-      )
-        fail('This email already has an account. Restore access from Members.');
+      const existing = checked(
+        await admin
+          .from('sentinel_members')
+          .select('*')
+          .eq('email', email)
+          .maybeSingle(),
+      );
+      if (existing?.role === 'owner')
+        fail('Owner accounts cannot be invited again.');
+      if (existing?.auth_id) {
+        const account = checked(
+          await admin.auth.admin.getUserById(existing.auth_id),
+        ).user;
+        if (account.email_confirmed_at)
+          fail(
+            'This member already activated their account. Restore access, or remove the member before inviting again.',
+          );
+      }
       const result = checked(
         await admin.auth.admin.generateLink({
           type: 'invite',
@@ -439,19 +447,55 @@ Deno.serve(async (req) => {
       );
       const invitation = crypto.randomUUID();
       checked(
-        await admin.from('sentinel_members').insert({
-          auth_id: result.user.id,
-          email,
-          role: 'member',
-          invitation_id: invitation,
-          invitation_expires: new Date(Date.now() + 48 * 3600000).toISOString(),
-        }),
+        await admin.from('sentinel_members').upsert(
+          {
+            ...(existing ? { id: existing.id } : {}),
+            disabled: false,
+            auth_id: result.user.id,
+            email,
+            role: 'member',
+            invitation_id: invitation,
+            invitation_expires: new Date(
+              Date.now() + 24 * 3600000,
+            ).toISOString(),
+          },
+          { onConflict: 'email' },
+        ),
       );
       return response({
         url: site + '#invite=' + result.properties.hashed_token,
       });
     }
     const um = path.match(/^auth\/users\/(\d+)$/);
+    if (um && req.method === 'DELETE') {
+      ownerOnly(member);
+      const target = checked(
+        await admin
+          .from('sentinel_members')
+          .select('*')
+          .eq('id', Number(um[1]))
+          .maybeSingle(),
+      );
+      if (!target) return response({ removed: true });
+      if (target.role === 'owner')
+        fail('Owner accounts cannot be removed.', 403);
+      checked(
+        await admin
+          .from('sentinel_members')
+          .update({
+            disabled: true,
+            invitation_id: null,
+            invitation_expires: null,
+          })
+          .eq('id', target.id),
+      );
+      if (target.auth_id)
+        checked(await admin.auth.admin.deleteUser(target.auth_id));
+      checked(
+        await admin.from('sentinel_members').delete().eq('id', target.id),
+      );
+      return response({ removed: true });
+    }
     if (um && req.method === 'PATCH') {
       ownerOnly(member);
       if (typeof body.disabled !== 'boolean') fail('Invalid access setting.');

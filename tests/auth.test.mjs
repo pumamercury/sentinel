@@ -438,6 +438,55 @@ test('invitation-only accounts enforce sessions and roles on every API, includin
     assert.equal(recovered.status, 200);
     assert.equal((await request('bugs', 'GET', null, ownerCookie)).status, 401);
     ownerCookie = recovered.cookie;
+    const freshMember = await request('auth/login', 'POST', member);
+    assert.equal(freshMember.status, 200);
+    const issuesBeforeRemoval = (
+      await request('bugs', 'GET', null, ownerCookie)
+    ).data;
+    assert.equal(
+      (await request('auth/users/' + id, 'DELETE', null, freshMember.cookie))
+        .status,
+      403,
+    );
+    assert.equal(
+      (
+        await request(
+          'auth/users/' + recovered.data.user.id,
+          'DELETE',
+          null,
+          ownerCookie,
+        )
+      ).status,
+      400,
+    );
+    assert.equal(
+      (await request('auth/users/' + id, 'DELETE', null, ownerCookie)).status,
+      200,
+    );
+    assert.equal(
+      (await request('bugs', 'GET', null, freshMember.cookie)).status,
+      401,
+    );
+    assert.equal((await request('auth/login', 'POST', member)).status, 401);
+    assert.deepEqual(
+      (await request('bugs', 'GET', null, ownerCookie)).data,
+      issuesBeforeRemoval,
+    );
+    assert.equal(
+      (await request('auth/users/' + id, 'DELETE', null, ownerCookie)).status,
+      200,
+    );
+    assert.equal(
+      (
+        await request(
+          'auth/invite',
+          'POST',
+          { email: member.email },
+          ownerCookie,
+        )
+      ).status,
+      200,
+    );
     assert.equal(
       (await request('auth/accept', 'POST', { ...owner, token: recovery }))
         .status,
